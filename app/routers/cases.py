@@ -24,6 +24,7 @@ from app.schemas import (
     CaseListItem,
     CaseStageAdvance,
     CaseStageHistoryOut,
+    CaseUpdate,
     PaginatedCases,
 )
 from app.schemas.audit import AuditEntryOut, AuditList
@@ -311,5 +312,46 @@ def advance_stage(
     """
     case = _get_visible_case(db, user, case_id)
     workflow.advance_case(db, case, payload.to_stage, user, note=payload.note)
+    db.commit()
+    return get_case(case.id, db=db, user=user)
+
+
+@router.patch("/{case_id}", response_model=CaseDetail)
+def update_case(
+    case_id: int,
+    payload: CaseUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(*CASE_WRITERS)),
+):
+    """Edit a case's title or status. The stage is not editable here.
+
+    Moving a case is POST /{case_id}/advance, which checks the transition
+    against the Act and writes the stage history. A PATCH that also set the
+    stage would be a second, unvalidated route to the same change and would
+    leave the timeline with unexplained jumps.
+    """
+    case = _get_visible_case(db, user, case_id)
+
+    fields = payload.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields to update")
+
+    changed = {k: v for k, v in fields.items() if getattr(case, k) != v}
+    if not changed:
+        return get_case(case.id, db=db, user=user)
+
+    for key, value in changed.items():
+        setattr(case, key, value)
+
+    audit.record(
+        db,
+        user,
+        action="case.update",
+        entity_type="case",
+        entity_id=case.id,
+        detail=", ".join(
+            f"{k}={v.value if hasattr(v, 'value') else v}" for k, v in changed.items()
+        ),
+    )
     db.commit()
     return get_case(case.id, db=db, user=user)

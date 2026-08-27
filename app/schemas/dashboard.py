@@ -40,7 +40,10 @@ class DashboardKpis(BaseModel):
 
     # 4. R&R — deliberately separate from compensation above. Never sum
     #    these with the compensation figures.
+    # Every household with a resettlement record, whatever its status — the
+    # denominator for "completed of entitled".
     rnr_entitled_count: int
+    rnr_pending_count: int
     rnr_in_progress_count: int
     rnr_completed_count: int
     rnr_disputed_count: int

@@ -335,3 +335,62 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
     )
+
+
+class InviteCode(Base):
+    """An invitation to register, issued by an administrator.
+
+    Accounts on this system are not self-serve: an officer account carries
+    real authority over other people's land, so registration is gated on a
+    code that an administrator issued for a specific role and district.
+
+    **The code is stored hashed, never in the clear, and never encrypted.**
+    Encryption is reversible, which means a database read would yield working
+    invitations. A one-way hash cannot: the server never needs to read a code
+    back, only to check that one presented matches. This is the same reason
+    passwords are hashed, and the same bcrypt context does the work.
+
+    A hash alone cannot be looked up, though, so the code is split. It is
+    issued as `BHM-<selector>-<secret>`:
+
+    - `selector` is a short random public half, stored in the clear and
+      indexed. It identifies WHICH invitation is being presented.
+    - `secret` is the long random private half, stored only as a bcrypt hash.
+      It proves the presenter actually holds the invitation.
+
+    That is the selector/verifier pattern used for password-reset tokens, and
+    it buys two things: one indexed lookup instead of bcrypt-comparing every
+    row, and a constant-time verification that cannot be turned into a timing
+    oracle by an attacker guessing codes.
+    """
+
+    __tablename__ = "invite_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    # The public half. Unique and indexed so presenting a code is one lookup.
+    selector: Mapped[str] = mapped_column(String(16), nullable=False, unique=True, index=True)
+
+    # bcrypt hash of the private half. Never returned by any response model.
+    secret_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # The role and district are fixed by whoever issued the invitation, not
+    # chosen by whoever redeems it. A code cannot be used to grant a role its
+    # issuer did not intend.
+    role: Mapped[Role] = mapped_column(_enum(Role, "role"), nullable=False)
+    district_id: Mapped[int | None] = mapped_column(ForeignKey("districts.id"), nullable=True)
+
+    # A note for the issuer's own records: "SLAO, Tumakuru intake, Sept".
+    label: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    max_uses: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    used_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    expires_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    is_revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    district: Mapped["District | None"] = relationship()

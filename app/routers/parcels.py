@@ -151,3 +151,44 @@ def list_parcels_for_case(
         )
         for parcel, owner_name, lon, lat in rows
     ]
+
+
+@router.get("/{parcel_id}", response_model=ParcelOut)
+def get_parcel(
+    parcel_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """One parcel, for the parcel detail page and the map popup's link.
+
+    Declared after /bbox and /search so those literal paths are matched
+    before this one treats "bbox" as an id.
+    """
+    row = (
+        db.query(Parcel, Person.name, ST_X(Parcel.geom), ST_Y(Parcel.geom))
+        .join(Person, Parcel.owner_id == Person.id)
+        .filter(Parcel.id == parcel_id)
+        .first()
+    )
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parcel not found")
+
+    parcel, owner_name, lon, lat = row
+
+    # Scoped through the parcel's case, so a landowner cannot read a parcel
+    # in a district they have nothing to do with by guessing ids.
+    visible = scope_cases_to_user(db.query(Case), user).filter(Case.id == parcel.case_id).first()
+    if visible is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parcel not found")
+
+    return ParcelOut(
+        id=parcel.id,
+        case_id=parcel.case_id,
+        survey_number=parcel.survey_number,
+        area_ha=parcel.area_ha,
+        status=parcel.status,
+        owner_id=parcel.owner_id,
+        owner_name=owner_name,
+        longitude=float(lon),
+        latitude=float(lat),
+    )
