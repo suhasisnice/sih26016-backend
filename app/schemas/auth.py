@@ -15,6 +15,10 @@ class UserOut(BaseModel):
     full_name: str
     role: Role
     district_id: int | None = None
+    # Resolved from the district relationship rather than left to the client
+    # to look up: the top bar names the district an officer is scoped to on
+    # every screen, and a second request for one string is not worth it.
+    district_name: str | None = None
 
 
 class LoginResponse(BaseModel):

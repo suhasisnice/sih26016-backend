@@ -15,6 +15,7 @@ from app.schemas.case import (
     CaseListItem,
     CaseStageAdvance,
     CaseStageHistoryOut,
+    CaseUpdate,
     PaginatedCases,
 )
 from app.schemas.common import Message
@@ -26,6 +27,7 @@ __all__ = [
     "CaseListItem",
     "CaseStageAdvance",
     "CaseStageHistoryOut",
+    "CaseUpdate",
     "LoginResponse",
     "Message",
     "PaginatedCases",

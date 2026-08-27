@@ -78,3 +78,16 @@ class CaseDetail(BaseModel):
     total_area_ha: float
     allowed_next_stages: list[Stage]
     stage_history: list[CaseStageHistoryOut]
+
+
+class CaseUpdate(BaseModel):
+    """Editable fields on a case. Deliberately not `stage`.
+
+    The stage moves only through POST /cases/{id}/advance, which validates
+    the transition against the Act and writes the stage history. Allowing it
+    here would give a second, unvalidated way to move a case and leave the
+    timeline with gaps.
+    """
+
+    title: str | None = Field(default=None, min_length=3, max_length=200)
+    status: CaseStatus | None = None

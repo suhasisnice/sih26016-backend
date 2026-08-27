@@ -23,9 +23,15 @@ def compute_rnr(db, case_ids: list[int]) -> dict:
         for status, count in rows:
             counts[status] = count
 
+    # The four status counts are mutually exclusive buckets, so the total is
+    # their sum. It is returned explicitly rather than left to the caller:
+    # the field was previously named rnr_entitled_count while holding only
+    # the PENDING count, which read as "everyone entitled" and produced
+    # "9 completed of 2 entitled" on the dashboard.
     return {
-        "rnr_entitled_count": counts[RnRStatus.PENDING],
+        "rnr_pending_count": counts[RnRStatus.PENDING],
         "rnr_in_progress_count": counts[RnRStatus.IN_PROGRESS],
         "rnr_completed_count": counts[RnRStatus.COMPLETED],
         "rnr_disputed_count": counts[RnRStatus.DISPUTED],
+        "rnr_entitled_count": sum(counts.values()),
     }

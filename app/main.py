@@ -13,6 +13,7 @@ from app.routers import (
     dashboard,
     documents,
     meta,
+    notices,
     objections,
     parcels,
     persons,
@@ -42,10 +43,17 @@ app.add_middleware(
 
 app.include_router(meta.router)
 app.include_router(reference.router)
+# Unauthenticated by design — a notice a citizen must log in to read has
+# not been published in any sense the Act would recognise.
+app.include_router(notices.router)
 app.include_router(auth.router)
 app.include_router(cases.router)
 app.include_router(parcels.router)
 app.include_router(persons.router)
+# Compensation and R&R are edited on their own paths, by different
+# offices, and are never reconciled into one endpoint.
+app.include_router(persons.compensation_router)
+app.include_router(persons.rnr_router)
 app.include_router(documents.router)
 app.include_router(objections.router)
 app.include_router(dashboard.router)
