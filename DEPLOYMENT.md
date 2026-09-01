@@ -56,6 +56,26 @@ Read [Known limitations](#known-limitations) before the demo, not after.
    — a message that reads like a wrong password and is not one. The session
    pooler is IPv4 and behaves the same for this purpose.
 
+   **Percent-encode the password when you paste it in.** Supabase prints
+   `[YOUR-PASSWORD]` as a placeholder and substituting it by hand is where
+   this goes wrong: the password sits in the userinfo half of a URI, so
+   `#`, `?`, `/`, `@`, `:` and `+` are read as structure rather than as
+   characters. A `#` is the cruel one — it starts a URI fragment, so
+   everything after it is discarded and the client authenticates with a
+   silently truncated password. Nothing reports a parsing problem; you get
+   an authentication or connection error against a password that is, as
+   typed, correct. `#` → `%23`, `?` → `%3F`, `/` → `%2F`, `+` → `%2B`,
+   `@` → `%40`, `:` → `%3A`. Resetting the password to an alphanumeric one
+   in Settings → Database sidesteps the whole class of it, and is worth
+   doing before the string goes into the Render dashboard too.
+
+   The transaction pooler string also arrives with `?pgbouncer=true`
+   appended. That flag is Prisma's; libpq rejects unknown connection
+   options outright, so it would fail the connection with
+   `invalid connection option "pgbouncer"`. `app/database.py` strips it on
+   the way in, so pasting the string whole is fine — but that is the app
+   absorbing it, not libpq tolerating it.
+
 Why two: the pooler is pgbouncer, which multiplexes many clients onto few
 server connections and breaks anything assuming a session survives between
 statements. `app/database.py` detects port 6543 (or a `pooler.supabase.com`
