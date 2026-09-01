@@ -118,11 +118,30 @@ docker compose run --rm --no-deps \
 Add `--rebuild` only when the models have changed shape since the last
 seed; it drops every table first. See [Known limitations](#known-limitations).
 
-The seed writes six accounts sharing the password `demo1234`
-(`dc.bengaluru`, `slao.bengaluru`, `rnr.bengaluru`, `field.bengaluru`,
-`admin`, `landowner`). **The deployed login page does not list them** — see
-§4 — so whoever is demonstrating needs that list from somewhere other than
-the screen in front of them.
+The seed writes **eleven** accounts, all sharing the password `demo1234`
+(override with `SEED_PASSWORD` at seed time):
+
+| Username | Role |
+|---|---|
+| `admin` | State Administrator |
+| `state.karnataka` | State officer |
+| `ministry` | Ministry officer |
+| `dc.bengaluru`, `dc.tumakuru` | District officer |
+| `slao.bengaluru` | SLAO |
+| `rnr.bengaluru` | RnR officer |
+| `field.bengaluru` | Field officer |
+| `landowner` | Landowner |
+| `nhai`, `kiadb` | Requiring body |
+
+The last five exist because the proposal chain runs requiring body →
+district → state → ministry, and without an account at each tier the
+approval path cannot be walked end to end.
+
+**The deployed login page does not list any of them** — see §4 — so whoever
+is demonstrating needs this table from somewhere other than the screen in
+front of them. It is also the reason §4 leaves `VITE_SHOW_DEMO_ACCOUNTS`
+unset: eleven working credentials on a public page, two of them able to
+approve at state and ministry level, is a different proposition from six.
 
 ---
 
