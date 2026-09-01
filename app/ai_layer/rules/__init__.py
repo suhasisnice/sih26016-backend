@@ -17,6 +17,7 @@ from app.ai_layer.rules.case_stalled import case_stalled
 from app.ai_layer.rules.document_missing import document_missing
 from app.ai_layer.rules.objection_unanswered import objection_unanswered
 from app.ai_layer.rules.possession_before_rnr import possession_before_rnr
+from app.ai_layer.rules.timeline_breach import timeline_breach
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,7 @@ REGISTRY = {
     "objection_unanswered": objection_unanswered,
     "award_unpaid": award_unpaid,
     "possession_before_rnr": possession_before_rnr,
+    "timeline_breach": timeline_breach,
 }
 
 

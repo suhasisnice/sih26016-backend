@@ -12,11 +12,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.ai_layer.constants import OBJECTION_RESPONSE_DAYS
-from app.core.enums import ObjectionStatus, Role
+from app.core.enums import AlertSeverity, ObjectionStatus, Role
 from app.dependencies import get_current_user, get_db, require_role, scope_cases_to_user
 from app.models import Case, Objection, Person, User
 from app.schemas.objection import ObjectionCreate, ObjectionList, ObjectionOut, ObjectionRespond
-from app.services import audit
+from app.services import audit, notify
 
 router = APIRouter(prefix="/objections", tags=["objections"])
 
@@ -190,6 +190,19 @@ def respond_to_objection(
         entity_id=objection.id,
         detail=f"-> {payload.status.value}",
     )
+
+    # under_review is a status change, not an answer — the objector's own
+    # clock is still running, so there is nothing decided to tell them yet.
+    if payload.status is not ObjectionStatus.UNDER_REVIEW:
+        notify.notify_objection_filer(
+            db,
+            objection,
+            case,
+            title=f"Your objection was {payload.status.value}",
+            body=f"{case.case_number}: {payload.response}",
+            severity=AlertSeverity.MEDIUM,
+        )
+
     db.commit()
 
     person = db.get(Person, objection.person_id)

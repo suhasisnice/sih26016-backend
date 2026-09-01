@@ -19,6 +19,13 @@ class UserOut(BaseModel):
     # to look up: the top bar names the district an officer is scoped to on
     # every screen, and a second request for one string is not worth it.
     district_name: str | None = None
+    # The tier above, for a state officer. Null for everybody else, which is
+    # how the frontend decides whether to show a state selector at all.
+    state_id: int | None = None
+    state_name: str | None = None
+    # Set only on a requiring-body account: the organisation it files
+    # proposals for, and the scope its proposal list is built from.
+    organisation: str | None = None
 
 
 class LoginResponse(BaseModel):

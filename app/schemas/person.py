@@ -41,6 +41,10 @@ class AffectedPersonOut(BaseModel):
     village_name: str
     has_land_title: bool
     is_landowner: bool
+    # Losing a dwelling, which is not the same as losing land. Reported
+    # separately because the Act and the problem statement both
+    # distinguish affected from displaced.
+    is_displaced: bool = False
     parcel_count: int
     total_area_ha: float
     # Null when this household owns no acquired land. Not zero — zero would
@@ -98,4 +102,22 @@ class AffectedPersonCreate(BaseModel):
     phone: str | None = Field(default=None, max_length=15)
     has_land_title: bool = True
     is_landowner: bool = False
+    # Whether this household loses its dwelling. Independent of both flags
+    # above: a landowner farming an outlying plot is affected but not
+    # displaced, and a labourer whose house stands on the acquired parcel is
+    # displaced while owning nothing.
+    is_displaced: bool = False
     rnr_entitlement: str | None = Field(default=None, max_length=200)
+
+
+class AffectedPersonUpdate(BaseModel):
+    """Correct a household's classification on a case.
+
+    Displacement in particular is established during the Social Impact
+    Assessment and routinely corrected afterwards, so it has to be editable
+    — a survey finding that a house sits inside the notified boundary is
+    exactly the kind of thing that arrives late.
+    """
+
+    is_landowner: bool | None = None
+    is_displaced: bool | None = None

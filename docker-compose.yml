@@ -40,6 +40,11 @@ services:
     # DATABASE_URL is deliberately NOT set here. A value in `environment`
     # overrides env_file, so hardcoding it made .env silently ignored.
     # config.py already defaults to the compose-internal db host.
+    #
+    # --reload lives here rather than in the Dockerfile: the image is what
+    # gets deployed, and a file-watching reloader has no business in it.
+    # Development still gets hot reload because this overrides the command.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     ports:
       - "8000:8000"
     volumes:

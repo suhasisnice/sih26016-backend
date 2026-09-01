@@ -19,6 +19,7 @@ from app.schemas.person import (
     AffectedPersonCreate,
     AffectedPersonList,
     AffectedPersonOut,
+    AffectedPersonUpdate,
     CompensationOut,
     CompensationUpdate,
     RnROut,
@@ -51,7 +52,7 @@ def list_affected_people(
         .join(Person, AffectedFamily.person_id == Person.id)
         .join(Village, Person.village_id == Village.id)
         .filter(AffectedFamily.case_id == case_id)
-        .order_by(AffectedFamily.is_landowner.desc(), Person.name)
+        .order_by(AffectedFamily.is_displaced.desc(), AffectedFamily.is_landowner.desc(), Person.name)
         .all()
     )
     if not rows:
@@ -95,6 +96,7 @@ def list_affected_people(
                 village_name=village_name,
                 has_land_title=person.has_land_title,
                 is_landowner=family.is_landowner,
+                is_displaced=family.is_displaced,
                 parcel_count=parcel_count,
                 total_area_ha=total_area,
                 compensation=(
@@ -278,7 +280,14 @@ def add_affected_person(
     db.add(person)
     db.flush()
 
-    db.add(AffectedFamily(case_id=case.id, person_id=person.id, is_landowner=payload.is_landowner))
+    db.add(
+        AffectedFamily(
+            case_id=case.id,
+            person_id=person.id,
+            is_landowner=payload.is_landowner,
+            is_displaced=payload.is_displaced,
+        )
+    )
     db.add(
         RnRRecord(
             case_id=case.id,
@@ -295,7 +304,10 @@ def add_affected_person(
         action="person.create",
         entity_type="person",
         entity_id=person.id,
-        detail=f"case={case.id} landowner={payload.is_landowner} title={payload.has_land_title}",
+        detail=(
+            f"case={case.id} landowner={payload.is_landowner} "
+            f"displaced={payload.is_displaced} title={payload.has_land_title}"
+        ),
     )
     db.commit()
     db.refresh(person)
@@ -311,6 +323,7 @@ def add_affected_person(
         village_name=village.name,
         has_land_title=person.has_land_title,
         is_landowner=payload.is_landowner,
+        is_displaced=payload.is_displaced,
         parcel_count=0,
         total_area_ha=0.0,
         compensation=None,
@@ -319,5 +332,113 @@ def add_affected_person(
             status=entitlement.status,
             entitlement=entitlement.entitlement,
             updated_on=entitlement.updated_on,
+        ),
+    )
+
+
+@router.patch("/{person_id}", response_model=AffectedPersonOut)
+def update_affected_person(
+    person_id: int,
+    payload: AffectedPersonUpdate,
+    case_id: int = Query(description="Which case's classification to correct"),
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(*PERSON_WRITERS)),
+):
+    """Correct how a household is classified on one case.
+
+    Scoped by case_id rather than editing the person globally, because these
+    are properties of the RELATIONSHIP, not of the person: the same
+    household can be a landowner in one acquisition and a displaced tenant
+    in another, and a global flag could not express that.
+
+    Displacement in particular is established during the Social Impact
+    Assessment and routinely corrected afterwards — a survey finding that a
+    dwelling sits inside the notified boundary is exactly the kind of thing
+    that arrives after the household was first recorded.
+    """
+    _visible_case_or_404(db, user, case_id)
+
+    family = (
+        db.query(AffectedFamily)
+        .filter(AffectedFamily.case_id == case_id, AffectedFamily.person_id == person_id)
+        .first()
+    )
+    if family is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="That household is not recorded as affected by this case",
+        )
+
+    fields = payload.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields to update")
+
+    changed = {k: v for k, v in fields.items() if v is not None and getattr(family, k) != v}
+    if changed:
+        for key, value in changed.items():
+            setattr(family, key, value)
+        audit.record(
+            db,
+            user,
+            action="affected_family.update",
+            entity_type="affected_family",
+            entity_id=family.id,
+            detail=f"case={case_id} " + " ".join(f"{k}={v}" for k, v in changed.items()),
+        )
+        db.commit()
+
+    person = db.get(Person, person_id)
+    village = db.get(Village, person.village_id)
+
+    parcel_count, total_area = 0, 0.0
+    row = (
+        db.query(func.count(Parcel.id), func.coalesce(func.sum(Parcel.area_ha), 0.0))
+        .filter(Parcel.case_id == case_id, Parcel.owner_id == person_id)
+        .one()
+    )
+    if row:
+        parcel_count, total_area = int(row[0]), round(float(row[1]), 4)
+
+    comp = (
+        db.query(Compensation)
+        .filter(Compensation.case_id == case_id, Compensation.person_id == person_id)
+        .first()
+    )
+    entitlement = (
+        db.query(RnRRecord)
+        .filter(RnRRecord.case_id == case_id, RnRRecord.person_id == person_id)
+        .first()
+    )
+
+    return AffectedPersonOut(
+        person_id=person.id,
+        name=person.name,
+        village_name=village.name if village else "—",
+        has_land_title=person.has_land_title,
+        is_landowner=family.is_landowner,
+        is_displaced=family.is_displaced,
+        parcel_count=parcel_count,
+        total_area_ha=total_area,
+        compensation=(
+            CompensationOut(
+                id=comp.id,
+                amount_awarded=comp.amount_awarded,
+                amount_paid=comp.amount_paid,
+                amount_pending=comp.amount_awarded - comp.amount_paid,
+                status=comp.status,
+                awarded_on=comp.awarded_on,
+            )
+            if comp
+            else None
+        ),
+        rnr=(
+            RnROut(
+                id=entitlement.id,
+                status=entitlement.status,
+                entitlement=entitlement.entitlement,
+                updated_on=entitlement.updated_on,
+            )
+            if entitlement
+            else None
         ),
     )

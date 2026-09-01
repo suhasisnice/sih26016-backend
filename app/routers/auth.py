@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
@@ -14,7 +14,7 @@ from app.schemas.invite import (
     RegisterRequest,
     RegisterResponse,
 )
-from app.services import audit, invites
+from app.services import audit, invites, ratelimit
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -28,24 +28,47 @@ def _user_out(user: User) -> UserOut:
         role=user.role,
         district_id=user.district_id,
         district_name=user.district.name if user.district else None,
+        state_id=user.state_id,
+        state_name=user.state.name if user.state else None,
+        organisation=user.organisation,
     )
 
 
 @router.post("/login", response_model=LoginResponse)
-def login(form: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+def login(
+    request: Request,
+    form: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+):
+    # Checked before the password is verified: a limiter that only runs
+    # after the bcrypt comparison still pays the bcrypt cost for every
+    # guess, which is most of what makes a login endpoint worth attacking.
+    wait = ratelimit.retry_after_seconds(request)
+    if wait is not None:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed sign-in attempts. Try again shortly.",
+            headers={"Retry-After": str(wait)},
+        )
+
     user = db.query(User).filter(User.username == form.username).first()
 
     # The same message for "no such user" and for "wrong password".
     # Distinguishing them would let anyone enumerate valid usernames.
     if user is None or not verify_password(form.password, user.password_hash):
+        ratelimit.record_failure(request)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password",
             headers={"WWW-Authenticate": "Bearer"},
         )
     if not user.is_active:
+        # Counts as a failure: an attacker who finds a disabled account
+        # should not get unlimited attempts against the rest.
+        ratelimit.record_failure(request)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
 
+    ratelimit.clear(request)
     audit.record(db, user, action="auth.login", entity_type="user", entity_id=user.id)
     db.commit()
 
@@ -77,6 +100,8 @@ def preview_invite(payload: InviteCheck, db: Session = Depends(get_db)):
         valid=True,
         role=invite.role,
         district_name=invite.district.name if invite.district else None,
+        state_name=invite.state.name if invite.state else None,
+        organisation=invite.organisation,
         expires_on=invite.expires_on,
     )
 
@@ -105,6 +130,12 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
         password_hash=hash_password(payload.password),
         role=invite.role,
         district_id=invite.district_id,
+        # The whole scope travels with the invitation, not just the
+        # district. A state officer redeeming a code without state_id would
+        # get an account that logs in and sees nothing, which reads as a
+        # broken system rather than as a misconfigured invitation.
+        state_id=invite.state_id,
+        organisation=invite.organisation,
         is_active=True,
     )
     db.add(user)

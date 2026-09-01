@@ -11,21 +11,43 @@ carries the real attack surface. Three things guard it:
   anything is written, catching any traversal the first rule missed.
 - Size is capped while streaming, so an oversized upload is refused
   partway rather than after it has filled the disk.
+
+Versioning, added alongside: re-uploading a doc_type that a case already has
+SUPERSEDES the previous row rather than sitting beside it as a second,
+equally authoritative copy. The old row keeps its bytes on disk and its place
+in the trail; only `is_current` changes. Nothing is ever deleted, because a
+superseded land record is still evidence of what was on file when a decision
+was taken.
+
+Every upload is hashed as it streams. The SHA-256 is tamper-evidence: a
+repository holding legal instruments has to be able to answer "is this the
+file we recorded", and a size in bytes cannot.
+
+Downloads are audited as well as uploads. For a land record, who READ a
+document is usually the more sensitive question, and it was the half that was
+missing.
 """
 
+import hashlib
 import uuid
 from datetime import date
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.core.enums import DocType, Role
 from app.dependencies import get_current_user, get_db, require_role, scope_cases_to_user
 from app.models import Case, Document, RequiredDocument, User
-from app.schemas.document import DocumentList, DocumentOut, MissingDocuments
+from app.schemas.document import (
+    DocumentList,
+    DocumentOut,
+    DocumentVersionHistory,
+    MissingDocuments,
+)
 from app.services import audit
 
 router = APIRouter(prefix="/documents", tags=["documents"])
@@ -61,15 +83,62 @@ def list_documents(
     case_id: int = Query(description="Case whose documents to list"),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    include_superseded: bool = Query(
+        default=False,
+        description="Include earlier versions. Off by default so the list shows what is on file now.",
+    ),
 ):
+    """Documents on a case — current versions only, unless asked otherwise.
+
+    Defaulting to current-only matters: once a document can be replaced, a
+    list that shows every revision by default turns a three-document case
+    into a nine-row list where nothing indicates which copy is operative.
+    """
+    _case_or_404(db, user, case_id)
+
+    query = db.query(Document).filter(Document.case_id == case_id)
+    if not include_superseded:
+        query = query.filter(Document.is_current.is_(True))
+
+    rows = query.order_by(Document.uploaded_on.desc(), Document.id.desc()).all()
+
+    superseded = (
+        db.query(func.count(Document.id))
+        .filter(Document.case_id == case_id, Document.is_current.is_(False))
+        .scalar()
+        or 0
+    )
+    return DocumentList(
+        items=[DocumentOut.model_validate(d) for d in rows],
+        total=len(rows),
+        superseded_count=int(superseded),
+    )
+
+
+@router.get("/versions", response_model=DocumentVersionHistory)
+def document_versions(
+    case_id: int = Query(description="Case to inspect"),
+    doc_type: DocType = Query(description="Which document type's history to return"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Every version of one document type on one case, newest first.
+
+    The revision chain behind a single row in the list above, so a reviewer
+    can see that an award copy was replaced, when, and by whom.
+    """
     _case_or_404(db, user, case_id)
     rows = (
         db.query(Document)
-        .filter(Document.case_id == case_id)
-        .order_by(Document.uploaded_on.desc(), Document.id.desc())
+        .filter(Document.case_id == case_id, Document.doc_type == doc_type)
+        .order_by(Document.version.desc(), Document.id.desc())
         .all()
     )
-    return DocumentList(items=[DocumentOut.model_validate(d) for d in rows], total=len(rows))
+    return DocumentVersionHistory(
+        case_id=case_id,
+        doc_type=doc_type,
+        versions=[DocumentOut.model_validate(d) for d in rows],
+    )
 
 
 @router.get("/missing", response_model=MissingDocuments)
@@ -91,9 +160,14 @@ def missing_documents(
         .filter(RequiredDocument.stage == case.stage)
         .all()
     ]
+    # Only CURRENT versions satisfy a requirement. Without this filter a
+    # superseded copy would keep answering for a document that has since
+    # been replaced — or withdrawn.
     present = [
         doc_type
-        for (doc_type,) in db.query(Document.doc_type).filter(Document.case_id == case_id).all()
+        for (doc_type,) in db.query(Document.doc_type)
+        .filter(Document.case_id == case_id, Document.is_current.is_(True))
+        .all()
     ]
 
     return MissingDocuments(
@@ -137,6 +211,10 @@ async def upload_document(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid upload path")
 
     written = 0
+    # Hashed as it streams, not by re-reading the file afterwards: a second
+    # pass over a 10 MB upload is wasted I/O, and re-reading opens a window
+    # where the bytes hashed are not the bytes written.
+    digest = hashlib.sha256()
     try:
         with destination.open("wb") as out:
             while chunk := await file.read(CHUNK_BYTES):
@@ -146,12 +224,38 @@ async def upload_document(
                         status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
                         detail=f"File exceeds the {settings.max_upload_bytes} byte limit",
                     )
+                digest.update(chunk)
                 out.write(chunk)
     except Exception:
         # Never leave a partial file behind: it would appear in the store
         # as a real document that cannot be opened.
         destination.unlink(missing_ok=True)
         raise
+
+    if written == 0:
+        # An empty file passes every check above and is never a real
+        # document. Refusing it here beats discovering it at a hearing.
+        destination.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty"
+        )
+
+    # Supersede the current version of this doc_type, if there is one. The
+    # previous row keeps its bytes and its place in the trail; only its
+    # is_current flag changes, so the history stays complete.
+    previous = (
+        db.query(Document)
+        .filter(
+            Document.case_id == case_id,
+            Document.doc_type == doc_type,
+            Document.is_current.is_(True),
+        )
+        .order_by(Document.version.desc())
+        .first()
+    )
+    next_version = (previous.version + 1) if previous else 1
+    if previous is not None:
+        previous.is_current = False
 
     document = Document(
         case_id=case_id,
@@ -163,6 +267,10 @@ async def upload_document(
         size_bytes=written,
         uploaded_by_user_id=user.id,
         uploaded_on=date.today(),
+        version=next_version,
+        supersedes_id=previous.id if previous else None,
+        is_current=True,
+        sha256=digest.hexdigest(),
     )
     db.add(document)
     db.flush()
@@ -172,7 +280,11 @@ async def upload_document(
         action="document.upload",
         entity_type="document",
         entity_id=document.id,
-        detail=f"{doc_type.value} on case {case_id} ({written} bytes)",
+        detail=(
+            f"{doc_type.value} v{next_version} on case {case_id} "
+            f"({written} bytes, sha256={document.sha256[:12]}…)"
+            + (f" superseding #{previous.id}" if previous else "")
+        ),
     )
     db.commit()
     db.refresh(document)
@@ -200,5 +312,18 @@ def download_document(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Document file is not on disk"
         )
+
+    # Reads are audited as well as writes. For a land record, who opened a
+    # document is usually the more sensitive question, and it was the half
+    # the trail was missing.
+    audit.record(
+        db,
+        user,
+        action="document.download",
+        entity_type="document",
+        entity_id=document.id,
+        detail=f"{document.doc_type.value} v{document.version} on case {document.case_id}",
+    )
+    db.commit()
 
     return FileResponse(path, media_type=document.content_type, filename=document.filename)

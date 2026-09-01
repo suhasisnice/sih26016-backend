@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
-from app.core.enums import CaseStatus, Role, Stage
+from app.core.enums import AlertSeverity, CaseStatus, Role, Stage
 from app.dependencies import get_current_user, get_db, require_role, scope_cases_to_user
 from app.models import (
     AuditLog,
@@ -15,6 +15,7 @@ from app.models import (
     Objection,
     Parcel,
     Project,
+    Proposal,
     User,
     Village,
 )
@@ -28,7 +29,7 @@ from app.schemas import (
     PaginatedCases,
 )
 from app.schemas.audit import AuditEntryOut, AuditList
-from app.services import audit, numbering, workflow
+from app.services import audit, notify, numbering, sla, workflow
 
 router = APIRouter(prefix="/cases", tags=["cases"])
 
@@ -70,6 +71,9 @@ def list_cases(
     district_id: int | None = None,
     project_id: int | None = None,
     search: str | None = Query(default=None, max_length=100),
+    overdue_only: bool = Query(
+        default=False, description="Only cases past their current stage's deadline"
+    ),
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
 ):
@@ -101,12 +105,22 @@ def list_cases(
         # query's structure.
         pattern = f"%{search}%"
         query = query.filter(Case.case_number.ilike(pattern) | Case.title.ilike(pattern))
+    if overdue_only:
+        # Filtered in SQL against the stored due date, so "show me what is
+        # late" stays one indexed comparison rather than fetching every case
+        # and discarding most of them.
+        query = query.filter(
+            Case.stage_due_on.isnot(None), Case.stage_due_on < date.today()
+        )
 
     total = query.order_by(None).count()
     rows = query.order_by(Case.stage_changed_at.asc(), Case.id.asc()).limit(limit).offset(offset).all()
 
     totals = _parcel_totals(db, [row[0].id for row in rows])
     today = date.today()
+    # Loaded once for the page rather than per row: the SLA table is nine
+    # rows and every case on the page reads from it.
+    sla_table = sla.load_sla(db)
 
     items = []
     for case, district_name, village_name, project_name in rows:
@@ -126,6 +140,11 @@ def list_cases(
                 days_in_stage=(today - case.stage_changed_at).days,
                 parcel_count=parcel_count,
                 total_area_ha=total_area,
+                stage_due_on=case.stage_due_on,
+                days_remaining=sla.days_remaining(case.stage_due_on, today),
+                timeline_status=sla.timeline_status(
+                    case.stage_due_on, case.stage, today, sla_table
+                ),
             )
         )
 
@@ -157,6 +176,19 @@ def get_case(case_id: int, db: Session = Depends(get_db), user: User = Depends(g
         .all()
     )
 
+    today = date.today()
+    sla_table = sla.load_sla(db)
+    sla_entry = sla_table.get(case.stage) or sla.DEFAULT_SLA[case.stage]
+
+    # Provenance, looked up from the proposal side — proposals.case_id is
+    # the single column that records this link, and it is indexed.
+    origin = (
+        db.query(Proposal.id, Proposal.proposal_number)
+        .filter(Proposal.case_id == case.id)
+        .first()
+    )
+    proposal_id, proposal_number = origin if origin else (None, None)
+
     return CaseDetail(
         id=case.id,
         case_number=case.case_number,
@@ -171,11 +203,19 @@ def get_case(case_id: int, db: Session = Depends(get_db), user: User = Depends(g
         village_name=case.village.name,
         stage_changed_at=case.stage_changed_at,
         created_at=case.created_at,
-        days_in_stage=(date.today() - case.stage_changed_at).days,
+        days_in_stage=(today - case.stage_changed_at).days,
         parcel_count=parcel_count,
         total_area_ha=total_area,
         allowed_next_stages=workflow.allowed_transitions(case.stage),
         stage_history=[CaseStageHistoryOut.model_validate(h) for h in history],
+        stage_due_on=case.stage_due_on,
+        days_remaining=sla.days_remaining(case.stage_due_on, today),
+        timeline_status=sla.timeline_status(case.stage_due_on, case.stage, today, sla_table),
+        standard_days=sla_entry["standard_days"],
+        statutory_days=sla_entry["statutory_days"],
+        sla_basis=sla_entry["basis"],
+        proposal_id=proposal_id,
+        proposal_number=proposal_number,
     )
 
 
@@ -220,6 +260,10 @@ def create_case(
         stage_changed_at=today,
         created_at=today,
     )
+    # A case gets a deadline the moment it opens, not on its first stage
+    # change — otherwise every brand-new case reads as "untracked" on the
+    # adherence tile, which is the tile most likely to be looked at.
+    sla.apply_due_date(db, case)
     db.add(case)
     db.flush()
 
@@ -312,6 +356,20 @@ def advance_stage(
     """
     case = _get_visible_case(db, user, case_id)
     workflow.advance_case(db, case, payload.to_stage, user, note=payload.note)
+
+    # Informational, not urgent — a stage moving forward is the case working
+    # as intended, not a problem the landowner needs to act on. LOW is the
+    # honest severity for "this happened", the same distinction the rule
+    # engine already draws between a finding and a fact.
+    stage_label = case.stage.value.replace("_", " ").title()
+    notify.notify_case_landowners(
+        db,
+        case,
+        title="Your case has moved to a new stage",
+        body=f"{case.case_number} is now at {stage_label}.",
+        severity=AlertSeverity.LOW,
+    )
+
     db.commit()
     return get_case(case.id, db=db, user=user)
 

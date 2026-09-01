@@ -21,10 +21,13 @@ from app.ai_layer.seed.generators import (
     generate_projects,
     generate_required_documents,
     generate_stage_history,
+    generate_stage_sla,
+    generate_states,
     generate_users,
     generate_affected_families,
     generate_villages,
 )
+from app.ai_layer.seed.pipeline import generate_proposals, generate_statutory_notices
 from app.config import settings
 from app.database import Base, SessionLocal, engine
 from app.models import (
@@ -36,12 +39,18 @@ from app.models import (
     Compensation,
     District,
     Document,
+    Notification,
     Objection,
     Parcel,
     Person,
     Project,
+    Proposal,
+    ProposalReview,
     RequiredDocument,
     RnRRecord,
+    StageSla,
+    State,
+    StatutoryNotice,
     User,
     Village,
 )
@@ -51,21 +60,30 @@ LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1", "db", ""}
 # Children before parents, so foreign keys never block the wipe.
 WIPE_ORDER = (
     Alert,
+    Notification,
     AuditLog,
+    StatutoryNotice,
     Objection,
     Document,
     RequiredDocument,
+    StageSla,
     AffectedFamily,
     RnRRecord,
     Compensation,
     Parcel,
     CaseStageHistory,
+    # proposals and cases reference each other (proposal.case_id and
+    # case.proposal_id), so TRUNCATE ... CASCADE handles the cycle; the
+    # order here only has to be stable, not topologically perfect.
+    ProposalReview,
+    Proposal,
     Case,
     User,
     Person,
     Project,
     Village,
     District,
+    State,
 )
 
 
@@ -120,12 +138,16 @@ def run_seed(rebuild: bool = False, allow_remote: bool = False) -> dict:
     try:
         _wipe(session)
 
-        districts = generate_districts(session)
+        states = generate_states(session)
+        districts = generate_districts(session, states)
         villages = generate_villages(session, districts)
         projects = generate_projects(session, districts)
         people = generate_people(session, villages, rng)
-        users = generate_users(session, districts, people)
-        cases = generate_cases(session, projects, districts, villages, rng, anchor)
+        users = generate_users(session, districts, people, states)
+        # Stage deadlines must exist before cases, because each case gets its
+        # due date at creation from this table.
+        generate_stage_sla(session)
+        cases = generate_cases(session, projects, districts, villages, states, rng, anchor)
         generate_stage_history(session, cases)
         owners_by_case, area_by_case_owner = generate_parcels(
             session, cases, people, districts, rng
@@ -137,11 +159,19 @@ def run_seed(rebuild: bool = False, allow_remote: bool = False) -> dict:
         generate_required_documents(session)
         generate_documents(session, cases, rng, anchor)
         generate_objections(session, cases, people, rng, anchor)
+        # Notices are built AFTER compensation, because an award notice
+        # reports the beneficiary count and total the compensation rows
+        # define.
+        notices_written = generate_statutory_notices(session, cases, districts, rng, anchor)
+        proposal_summary = generate_proposals(
+            session, states, districts, villages, users, cases, rng, anchor
+        )
 
         anomalies = apply_anomalies(session, cases, rng, anchor)
 
         summary = {
             "anchor_date": anchor.isoformat(),
+            "states": len(states),
             "districts": len(districts),
             "villages": len(villages),
             "projects": len(projects),
@@ -156,6 +186,9 @@ def run_seed(rebuild: bool = False, allow_remote: bool = False) -> dict:
             "required_document_rules": session.query(RequiredDocument).count(),
             "documents": session.query(Document).count(),
             "objections": session.query(Objection).count(),
+            "statutory_notices": notices_written,
+            "stage_sla_rows": session.query(StageSla).count(),
+            **proposal_summary,
             **anomalies,
         }
         session.commit()

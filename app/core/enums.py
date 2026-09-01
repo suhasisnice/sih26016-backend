@@ -73,11 +73,27 @@ class AlertSeverity(str, Enum):
 
 
 class Role(str, Enum):
+    """Who can be on the system.
+
+    The first six are district-and-below. REQUIRING_BODY, STATE_OFFICER and
+    MINISTRY_OFFICER were added for the proposal workflow: a proposal is
+    submitted by the body that wants the land, scrutinised by the state, and
+    sanctioned centrally, so each tier needs an account of its own. Without
+    them the "approval" in "submission, verification, approval" would just be
+    the same district officer signing their own paperwork.
+    """
     LANDOWNER = "landowner"
     FIELD_OFFICER = "field_officer"
     SLAO = "slao"
     RNR_OFFICER = "rnr_officer"
     DISTRICT_OFFICER = "district_officer"
+    # Submits proposals. Sees its own proposals and the cases they became,
+    # and nothing else — a requiring body is a petitioner, not an officer.
+    REQUIRING_BODY = "requiring_body"
+    # Scrutinises proposals for one state; sees every case in that state.
+    STATE_OFFICER = "state_officer"
+    # Sanctions proposals; reads nationally, writes nothing operational.
+    MINISTRY_OFFICER = "ministry_officer"
     ADMIN = "admin"
 
 
@@ -98,3 +114,63 @@ class DocType(str, Enum):
     RNR_SCHEME_DOCUMENT = "rnr_scheme_document"
     POSSESSION_CERTIFICATE = "possession_certificate"
     MONITORING_REPORT = "monitoring_report"
+
+
+class ProposalStatus(str, Enum):
+    """Where a proposal sits in the approval chain.
+
+    DRAFT and SUBMITTED belong to the requiring body; UNDER_SCRUTINY to the
+    state; the three terminal values to the ministry. RETURNED is distinct
+    from REJECTED on purpose: returned means "fix this and resubmit", which
+    is by far the commonest real outcome, and collapsing it into rejected
+    would lose the difference between a correctable defect and a refusal.
+    """
+    DRAFT = "draft"
+    SUBMITTED = "submitted"
+    UNDER_SCRUTINY = "under_scrutiny"
+    RETURNED = "returned"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    WITHDRAWN = "withdrawn"
+
+
+class NoticeType(str, Enum):
+    """The published instruments the Act requires, in issue order.
+
+    These are what "notifications issued" and "awards declared" actually
+    count. Before this existed both numbers had to be inferred from a case's
+    CURRENT stage, so a case that moved past declaration stopped counting as
+    ever having been notified — which is the opposite of what a cumulative
+    figure means.
+    """
+    PRELIMINARY_NOTIFICATION = "preliminary_notification"   # s.11
+    DECLARATION = "declaration"                             # s.19
+    AWARD = "award"                                         # s.23
+    POSSESSION_NOTICE = "possession_notice"                 # s.38
+
+
+class TimelineStatus(str, Enum):
+    """How a case is tracking against its stage deadline.
+
+    Derived, never stored on the case: it is a function of today's date, so
+    a stored copy would be stale the morning after it was written.
+    """
+    ON_TIME = "on_time"
+    AT_RISK = "at_risk"
+    BREACHED = "breached"
+
+
+class NotificationChannel(str, Enum):
+    IN_APP = "in_app"
+    EMAIL = "email"
+    SMS = "sms"
+
+
+class RiskBand(str, Enum):
+    """Output of the predictive layer. Bands rather than a bare score,
+    because a raw 0.61 invites false precision from a model built on a few
+    hundred historical transitions."""
+    LOW = "low"
+    MODERATE = "moderate"
+    ELEVATED = "elevated"
+    SEVERE = "severe"

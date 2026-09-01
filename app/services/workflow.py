@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 
 from app.core.enums import CaseStatus, Stage
 from app.models import Case, CaseStageHistory, User
-from app.services import audit
+from app.services import audit, sla
 
 STAGE_ORDER: list[Stage] = list(Stage)
 TERMINAL_STAGE = STAGE_ORDER[-1]
@@ -75,6 +75,11 @@ def advance_case(
 
     case.stage = to_stage
     case.stage_changed_at = effective_date
+    # The deadline for the stage the case is now in. Written here rather
+    # than derived on read, so timeline adherence is one indexed column
+    # instead of a stage_sla join on every dashboard query — and written in
+    # this transaction, so it can never describe a stage the case left.
+    sla.apply_due_date(db, case)
     # A case that moved is active again by definition. Whether it has since
     # gone quiet is the stalled-case rule's call, not ours.
     if to_stage is TERMINAL_STAGE:

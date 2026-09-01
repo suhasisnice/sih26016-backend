@@ -87,3 +87,95 @@ RNR_ENTITLEMENTS = [
     "Annuity in lieu of employment",
     "Transportation and shifting allowance",
 ]
+
+
+# --- Proposal pipeline seed text ---
+# Real requiring bodies and plausible purposes, so the pipeline screen reads
+# like a register rather than like lorem ipsum.
+PROPOSAL_TEMPLATES = [
+    {
+        "title": "Ring Road Phase III land requirement",
+        "requiring_body": "National Highways Authority of India",
+        "purpose": (
+            "Acquisition of agricultural land along the proposed Phase III alignment "
+            "for a four-lane carriageway with service roads, including provision for "
+            "a grade-separated junction at the district boundary."
+        ),
+    },
+    {
+        "title": "Feeder canal alignment, left bank",
+        "requiring_body": "Karnataka Neeravari Nigam",
+        "purpose": (
+            "Land required for a lined feeder canal and inspection path to extend "
+            "irrigation to command area villages currently dependent on borewells."
+        ),
+    },
+    {
+        "title": "220kV transmission corridor",
+        "requiring_body": "Karnataka Power Transmission Corporation",
+        "purpose": (
+            "Right of way for a double-circuit transmission corridor connecting the "
+            "proposed substation to the existing grid, with tower footings on "
+            "acquired land and conductor easement over the remainder."
+        ),
+    },
+    {
+        "title": "Railway freight siding and approach",
+        "requiring_body": "South Western Railway",
+        "purpose": (
+            "Land for a freight loading siding, approach road and holding yard to "
+            "serve the industrial cluster and remove goods traffic from the town."
+        ),
+    },
+    {
+        "title": "Industrial park extension, sector 4",
+        "requiring_body": "Karnataka Industrial Area Development Board",
+        "purpose": (
+            "Extension of the existing industrial area to accommodate allotted units, "
+            "internal roads, effluent treatment and a green buffer along the village "
+            "boundary."
+        ),
+    },
+    {
+        "title": "District hospital and staff quarters",
+        "requiring_body": "Karnataka Public Works Department",
+        "purpose": (
+            "Land for a 200-bed district hospital block, outpatient wing, ambulance "
+            "bay and residential quarters for medical staff."
+        ),
+    },
+    {
+        "title": "Solar park evacuation infrastructure",
+        "requiring_body": "Karnataka Renewable Energy Development Limited",
+        "purpose": (
+            "Acquisition for a pooling substation and evacuation corridor serving the "
+            "notified solar park, including access road for construction and "
+            "maintenance."
+        ),
+    },
+]
+
+RETURN_NOTES = [
+    "Alignment drawing does not match the survey numbers listed. Resubmit with a "
+    "reconciled schedule.",
+    "Social impact pre-assessment is missing. Attach it before the file can be "
+    "placed for sanction.",
+    "Estimated area exceeds the sanctioned project boundary. Revise or attach the "
+    "revised project approval.",
+]
+
+SCRUTINY_NOTES = [
+    "Land schedule verified against village records. Placed for sanction.",
+    "Alternatives examined; no less-displacing alignment available. Recommended.",
+    "Estimates checked against the district rate schedule. Recommended for sanction.",
+]
+
+APPROVAL_NOTES = [
+    "Sanctioned. District administration to initiate proceedings under Section 11.",
+    "Approved subject to the R&R entitlements recorded in the scrutiny note.",
+]
+
+REJECTION_NOTES = [
+    "Rejected. The stated purpose does not fall within public purpose as defined "
+    "under Section 2(1).",
+]
