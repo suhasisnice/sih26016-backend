@@ -6,11 +6,15 @@ from app.core.enums import (
     CaseStatus,
     CompensationStatus,
     DocType,
+    NoticeType,
     ObjectionStatus,
     ParcelStatus,
+    ProposalStatus,
+    RiskBand,
     Role,
     RnRStatus,
     Stage,
+    TimelineStatus,
 )
 from app.database import engine
 
@@ -46,4 +50,8 @@ def get_enums():
         "alert_severities": _values(AlertSeverity),
         "roles": _values(Role),
         "doc_types": _values(DocType),
+        "proposal_statuses": _values(ProposalStatus),
+        "notice_types": _values(NoticeType),
+        "timeline_statuses": _values(TimelineStatus),
+        "risk_bands": _values(RiskBand),
     }

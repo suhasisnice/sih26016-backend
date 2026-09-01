@@ -9,7 +9,16 @@ number that is right — and these are what a judge reads off the screen.
 """
 
 import sys
+from pathlib import Path
 
+# Run as `python scripts/verify_integration.py` and sys.path[0] is scripts/,
+# which does not contain the app package. Put the project root on the path
+# so the documented command works without a PYTHONPATH incantation.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
+from sqlalchemy import func  # noqa: E402
+
+from app.ai_layer import constants as c  # noqa: E402
 from app.ai_layer.constants import anchor_date
 from app.ai_layer.kpis import compute_kpis
 from app.ai_layer.loaders import load_cases
@@ -26,6 +35,7 @@ from app.database import SessionLocal
 from app.models import (
     AffectedFamily,
     Alert,
+    AuditLog,
     Case,
     Compensation,
     District,
@@ -113,20 +123,69 @@ def main() -> int:
                 check(f"rejects {bad}", "ValueError", "ValueError")
 
         print("\nRules fire exactly on the injected anomalies")
+        # These counts describe a freshly seeded database, so check that is
+        # what we are looking at before comparing any of them.
+        #
+        # The seed writes no audit rows; the API writes one for every change
+        # it makes. So a mutating audit row means somebody has driven the API
+        # against this database since the seed, and the counts below are
+        # measuring that too. scripts/verify_build.py is the usual culprit:
+        # sanctioning a proposal creates a real case, at the first stage,
+        # with none of its documents on file yet — which correctly trips
+        # document_missing and moves that number three at a time.
+        #
+        # Without this check, that arrives as "document_missing got=6
+        # expected=3", which reads like a broken rule and is not one.
+        read_only_actions = {"auth.login", "admin.run_rules"}
+        mutations = [
+            (action, count)
+            for action, count in db.query(AuditLog.action, func.count(AuditLog.id))
+            .group_by(AuditLog.action)
+            .order_by(AuditLog.action)
+            .all()
+            if action not in read_only_actions and not action.startswith("export.")
+        ]
+        if not check("database is in seed state", not mutations, True):
+            print(
+                "       API writes since the seed: "
+                + ", ".join(f"{action} x{count}" for action, count in mutations)
+            )
+            print("       Reseed before trusting the counts below:")
+            print("         docker compose exec api python -m app.ai_layer.seed")
+
         cases = load_cases(db)
         alerts = run_all_rules(cases, anchor_date())
         by_rule: dict[str, int] = {}
         for a in alerts:
             by_rule[a["rule"]] = by_rule.get(a["rule"], 0) + 1
+        # Read off the seed's anomaly constants rather than repeated here as
+        # literals: a literal silently goes stale the moment someone tunes a
+        # constant, which is how this check last drifted.
+        #
+        # case_stalled counts the timeline breaches too, and that is correct,
+        # not double-reporting. A breach is seeded by pushing stage_changed_at
+        # back by a full stage allowance plus a margin — thirty-five days at
+        # the very least — and STALLED_DAYS is a flat ten. A case that has not
+        # moved in five weeks genuinely is stalled as well as past its
+        # deadline; the two rules answer different questions about it ("nobody
+        # has touched this" vs "this stage is over its allowance") and an
+        # officer needs both.
+        stalled_seeded = c.ANOMALY_STALLED_CRITICAL_CASES + c.ANOMALY_STALLED_WARNING_CASES
         expected_counts = {
-            "case_stalled": 4,
-            "document_missing": 3,
-            "objection_unanswered": 2,
-            "award_unpaid": 1,
-            "possession_before_rnr": 1,
+            "case_stalled": stalled_seeded + c.ANOMALY_TIMELINE_BREACHED,
+            "document_missing": c.ANOMALY_DOCUMENTS_REMOVED,
+            "objection_unanswered": c.ANOMALY_OBJECTIONS_FORCED_OPEN,
+            "award_unpaid": c.ANOMALY_AWARDS_FORCED_UNPAID,
+            "possession_before_rnr": c.ANOMALY_POSSESSION_BEFORE_RNR,
+            "timeline_breach": c.ANOMALY_TIMELINE_BREACHED,
         }
+        # A rule registered with nothing seeded for it is a hole in this
+        # check, so say so instead of raising KeyError halfway through.
+        check("every registered rule has a seeded expectation",
+              sorted(REGISTRY), sorted(expected_counts))
         for rule_name in REGISTRY:
-            check(f"{rule_name} count", by_rule.get(rule_name, 0), expected_counts[rule_name])
+            check(f"{rule_name} count", by_rule.get(rule_name, 0),
+                  expected_counts.get(rule_name, "<nothing seeded>"))
 
         print("\nRules are deterministic and severities are valid")
         again = run_all_rules(load_cases(db), anchor_date())

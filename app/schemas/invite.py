@@ -49,6 +49,8 @@ class InviteCodePreview(BaseModel):
     valid: bool
     role: Role | None = None
     district_name: str | None = None
+    state_name: str | None = None
+    organisation: str | None = None
     expires_on: date | None = None
     reason: str | None = None
 
@@ -56,6 +58,12 @@ class InviteCodePreview(BaseModel):
 class InviteCodeCreate(BaseModel):
     role: Role
     district_id: int | None = None
+    # For a state officer. The route rejects a state-scoped role without
+    # one, because such an account would log in and see nothing.
+    state_id: int | None = None
+    # For a requiring body — the organisation the account files proposals
+    # for. Fixed by the issuer, never typed by the person signing up.
+    organisation: str | None = Field(default=None, max_length=120)
     label: str | None = Field(default=None, max_length=120)
     max_uses: int = Field(default=1, ge=1, le=50)
     expires_on: date | None = None
@@ -71,6 +79,9 @@ class InviteCodeOut(BaseModel):
     role: Role
     district_id: int | None
     district_name: str | None = None
+    state_id: int | None = None
+    state_name: str | None = None
+    organisation: str | None = None
     label: str | None
     max_uses: int
     used_count: int

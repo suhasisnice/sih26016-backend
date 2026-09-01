@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from geoalchemy2.functions import ST_MakeEnvelope, ST_X, ST_Y
 from sqlalchemy.orm import Session
 
-from app.core.enums import ParcelStatus
-from app.dependencies import get_current_user, get_db, scope_cases_to_user
+from app.core.enums import ParcelStatus, Role
+from app.dependencies import get_current_user, get_db, require_role, scope_cases_to_user
 from app.models import Case, Parcel, Person, User
 from app.schemas import (
     ParcelFeature,
@@ -11,9 +11,15 @@ from app.schemas import (
     ParcelGeometry,
     ParcelOut,
 )
-from app.schemas.geo import ParcelProperties
+from app.schemas.geo import ParcelCreate, ParcelProperties, ParcelUpdate
+from app.services import audit
 
 router = APIRouter(prefix="/parcels", tags=["parcels"])
+
+# Who may register or correct a parcel. A field officer is the point of this
+# list: they are the person standing in the field with the GPS, and until
+# now the role could not record anything about a parcel at all.
+PARCEL_WRITERS = (Role.ADMIN, Role.DISTRICT_OFFICER, Role.SLAO, Role.FIELD_OFFICER)
 
 # A map viewport can cover thousands of parcels. Capping the response keeps
 # one careless zoom-out from pulling the whole country into the browser;
@@ -192,3 +198,155 @@ def get_parcel(
         longitude=float(lon),
         latitude=float(lat),
     )
+
+
+def _parcel_out(parcel: Parcel, owner_name: str, lon: float, lat: float) -> ParcelOut:
+    """One place that builds the parcel response, so the four routes that
+    return one cannot drift into four slightly different shapes."""
+    return ParcelOut(
+        id=parcel.id,
+        case_id=parcel.case_id,
+        survey_number=parcel.survey_number,
+        area_ha=parcel.area_ha,
+        status=parcel.status,
+        owner_id=parcel.owner_id,
+        owner_name=owner_name,
+        longitude=float(lon),
+        latitude=float(lat),
+    )
+
+
+def _reload_parcel(db: Session, parcel_id: int) -> ParcelOut:
+    row = (
+        db.query(Parcel, Person.name, ST_X(Parcel.geom), ST_Y(Parcel.geom))
+        .join(Person, Parcel.owner_id == Person.id)
+        .filter(Parcel.id == parcel_id)
+        .first()
+    )
+    parcel, owner_name, lon, lat = row
+    return _parcel_out(parcel, owner_name, lon, lat)
+
+
+@router.post("", response_model=ParcelOut, status_code=status.HTTP_201_CREATED)
+def create_parcel(
+    payload: ParcelCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(*PARCEL_WRITERS)),
+):
+    """Register a parcel where it stands — the field-collection path.
+
+    Geo-tagging was read-only before this: every coordinate in the system
+    came from the seed, so "GIS-enabled geo-tagging" was a map of data
+    nobody could add to. The coordinates arrive from the device and are
+    written straight to PostGIS as an EWKT point, which is what the bbox
+    query and the map already read.
+    """
+    case = scope_cases_to_user(db.query(Case), user).filter(Case.id == payload.case_id).first()
+    if case is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
+
+    owner = db.get(Person, payload.owner_id)
+    if owner is None:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Unknown owner_id")
+
+    # A survey number is unique within a case: the same number twice is a
+    # duplicate entry, and duplicated parcels double-count area on every
+    # dashboard figure that sums them.
+    duplicate = (
+        db.query(Parcel.id)
+        .filter(Parcel.case_id == payload.case_id, Parcel.survey_number == payload.survey_number)
+        .first()
+    )
+    if duplicate:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Survey number '{payload.survey_number}' is already recorded on this case",
+        )
+
+    parcel = Parcel(
+        case_id=payload.case_id,
+        survey_number=payload.survey_number,
+        area_ha=payload.area_ha,
+        owner_id=payload.owner_id,
+        status=payload.status,
+        geom=f"SRID=4326;POINT({payload.longitude} {payload.latitude})",
+    )
+    db.add(parcel)
+    db.flush()
+
+    audit.record(
+        db,
+        user,
+        action="parcel.create",
+        entity_type="parcel",
+        entity_id=parcel.id,
+        detail=(
+            f"case={payload.case_id} survey={payload.survey_number} "
+            f"area={payload.area_ha}ha at ({payload.latitude:.5f},{payload.longitude:.5f})"
+            + (f" +/-{payload.gps_accuracy_m}m" if payload.gps_accuracy_m is not None else "")
+        ),
+    )
+    db.commit()
+    return _reload_parcel(db, parcel.id)
+
+
+@router.patch("/{parcel_id}", response_model=ParcelOut)
+def update_parcel(
+    parcel_id: int,
+    payload: ParcelUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(*PARCEL_WRITERS)),
+):
+    """Correct a parcel, or move its acquisition status along.
+
+    Latitude and longitude move together or not at all. Accepting one alone
+    would place the parcel on a line through the original point, which is a
+    silently wrong location rather than an obviously missing one.
+    """
+    parcel = db.get(Parcel, parcel_id)
+    if parcel is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parcel not found")
+
+    # Entitlement is checked against the case, not the parcel: knowing a
+    # parcel id must never be enough to edit another district's land record.
+    case = scope_cases_to_user(db.query(Case), user).filter(Case.id == parcel.case_id).first()
+    if case is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Parcel not found")
+
+    fields = payload.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields to update")
+
+    has_lon = fields.get("longitude") is not None
+    has_lat = fields.get("latitude") is not None
+    if has_lon != has_lat:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Send longitude and latitude together, or neither",
+        )
+
+    changes = []
+    if has_lon and has_lat:
+        parcel.geom = f"SRID=4326;POINT({fields['longitude']} {fields['latitude']})"
+        changes.append(f"geom=({fields['latitude']:.5f},{fields['longitude']:.5f})")
+
+    for key in ("survey_number", "area_ha", "status"):
+        if key in fields and fields[key] is not None:
+            value = fields[key]
+            if getattr(parcel, key) != value:
+                setattr(parcel, key, value)
+                changes.append(f"{key}={value.value if hasattr(value, 'value') else value}")
+
+    if not changes:
+        return _reload_parcel(db, parcel.id)
+
+    audit.record(
+        db,
+        user,
+        action="parcel.update",
+        entity_type="parcel",
+        entity_id=parcel.id,
+        detail=", ".join(changes),
+    )
+    db.commit()
+    return _reload_parcel(db, parcel.id)

@@ -4,8 +4,13 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.enums import Role
-from app.dependencies import DISTRICT_SCOPED_ROLES, get_db, require_role
-from app.models import District, InviteCode, User
+from app.dependencies import (
+    DISTRICT_SCOPED_ROLES,
+    STATE_SCOPED_ROLES,
+    get_db,
+    require_role,
+)
+from app.models import District, InviteCode, State, User
 from app.schemas.dashboard import RunRulesResult
 from app.schemas.invite import (
     InviteCodeCreate,
@@ -13,7 +18,7 @@ from app.schemas.invite import (
     InviteCodeList,
     InviteCodeOut,
 )
-from app.services import alerts, audit, invites
+from app.services import alerts, audit, invites, notify
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -30,15 +35,30 @@ def run_rules(
     current data, so running it twice in a row produces the same alerts.
     """
     summary = alerts.regenerate_alerts(db)
+    # The alerts table is rebuilt from scratch on every run, by design. The
+    # inbox is not: fan_out only adds what is not already sitting unread, so
+    # running this twice in one night does not hand everybody a second copy
+    # of the same finding.
+    db.flush()
+    delivery = notify.fan_out(db)
+
     audit.record(
         db,
         user,
         action="admin.run_rules",
         entity_type="alert",
-        detail=f"{summary['alerts_generated']} alerts from {summary['cases_evaluated']} cases",
+        detail=(
+            f"{summary['alerts_generated']} alerts from {summary['cases_evaluated']} cases; "
+            f"{delivery['notifications_created']} notifications to "
+            f"{delivery['recipients']} recipients"
+        ),
     )
     db.commit()
-    return RunRulesResult(**summary)
+    return RunRulesResult(
+        **summary,
+        notifications_created=delivery["notifications_created"],
+        notification_recipients=delivery["recipients"],
+    )
 
 
 @router.post(
@@ -69,10 +89,32 @@ def create_invite_code(
             detail=f"Role '{payload.role.value}' works within a district, so the invitation needs one",
         )
 
+    # Same reasoning one tier up. A state officer with no state is scoped to
+    # nothing, and an account that can log in but see nothing looks like a
+    # bug to whoever redeems the invitation.
+    if payload.role in STATE_SCOPED_ROLES:
+        if payload.state_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Role '{payload.role.value}' works within a state, so the invitation needs one",
+            )
+        if db.get(State, payload.state_id) is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="State not found")
+
+    # A requiring body files proposals AS an organisation. Without one the
+    # account cannot submit anything and its proposal list is empty.
+    if payload.role is Role.REQUIRING_BODY and not payload.organisation:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A requiring-body invitation needs the organisation it files for",
+        )
+
     invite, code = invites.issue(
         db,
         role=payload.role,
         district_id=payload.district_id,
+        state_id=payload.state_id,
+        organisation=payload.organisation,
         label=payload.label,
         max_uses=payload.max_uses,
         expires_on=payload.expires_on,
@@ -137,6 +179,9 @@ def _invite_out(db: Session, invite: InviteCode) -> InviteCodeOut:
         role=invite.role,
         district_id=invite.district_id,
         district_name=invite.district.name if invite.district else None,
+        state_id=invite.state_id,
+        state_name=invite.state.name if invite.state else None,
+        organisation=invite.organisation,
         label=invite.label,
         max_uses=invite.max_uses,
         used_count=invite.used_count,

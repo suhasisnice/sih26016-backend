@@ -13,7 +13,15 @@ from collections import defaultdict
 
 from sqlalchemy.orm import Session
 
-from app.models import Case, Compensation, Document, Objection, RequiredDocument, RnRRecord
+from app.models import (
+    Case,
+    Compensation,
+    Document,
+    Objection,
+    RequiredDocument,
+    RnRRecord,
+    StageSla,
+)
 
 
 def load_cases(db: Session, case_ids: list[int] | None = None) -> list[dict]:
@@ -28,7 +36,10 @@ def load_cases(db: Session, case_ids: list[int] | None = None) -> list[dict]:
         rnr_statuses[case_id].append(status.value)
 
     document_types = defaultdict(list)
-    query = db.query(Document.case_id, Document.doc_type)
+    # Only CURRENT versions count as on file. A superseded award copy is
+    # history, not a satisfied requirement — without this filter, replacing
+    # a document would leave the old row still answering for it.
+    query = db.query(Document.case_id, Document.doc_type).filter(Document.is_current.is_(True))
     if scoped:
         query = query.filter(Document.case_id.in_(case_ids))
     for case_id, doc_type in query.all():
@@ -69,6 +80,13 @@ def load_cases(db: Session, case_ids: list[int] | None = None) -> list[dict]:
             }
         )
 
+    # Stage allowances, so the timeline rule can judge a case against its
+    # own stage rather than one flat threshold for all nine.
+    standard_days_by_stage = {
+        stage: standard_days
+        for stage, standard_days in db.query(StageSla.stage, StageSla.standard_days).all()
+    }
+
     case_query = db.query(Case).order_by(Case.id)
     if scoped:
         case_query = case_query.filter(Case.id.in_(case_ids))
@@ -79,6 +97,8 @@ def load_cases(db: Session, case_ids: list[int] | None = None) -> list[dict]:
             "case_number": case.case_number,
             "stage": case.stage.value,
             "stage_changed_at": case.stage_changed_at,
+            "stage_due_on": case.stage_due_on,
+            "stage_standard_days": standard_days_by_stage.get(case.stage),
             "rnr_statuses": rnr_statuses.get(case.id, []),
             "document_types": document_types.get(case.id, []),
             "required_document_types": required_by_stage.get(case.stage, []),

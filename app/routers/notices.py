@@ -106,3 +106,168 @@ def list_notices(
     ]
 
     return NoticeList(items=items, total=len(items))
+
+
+# --------------------------------------------------------------------------
+# The authenticated side: issuing an instrument, and the register per case.
+#
+# The public list above stays exactly as narrow as it was. These routes are
+# how a notice gets ONTO that list, and how "notifications issued" and
+# "awards declared" become countable facts rather than inferences from a
+# case's current stage.
+# --------------------------------------------------------------------------
+
+from fastapi import Depends, HTTPException, status  # noqa: E402
+
+from app.core.enums import NoticeType, Role  # noqa: E402
+from app.dependencies import (  # noqa: E402
+    get_current_user,
+    require_role,
+    scope_cases_to_user,
+)
+from app.models import StatutoryNotice, User  # noqa: E402
+from app.schemas.notice import (  # noqa: E402
+    StatutoryNoticeCreate,
+    StatutoryNoticeList,
+    StatutoryNoticeOut,
+)
+from app.services import audit  # noqa: E402
+
+# Issuing a statutory instrument is an act with legal weight, so it is
+# narrower than the general case-writer list: a field officer records
+# findings, they do not publish notifications.
+NOTICE_ISSUERS = (Role.ADMIN, Role.DISTRICT_OFFICER, Role.SLAO)
+
+# The stage a case must have reached before each instrument can be issued.
+# An award published before the declaration stage is not an early award, it
+# is a data-entry error, and the register is the wrong place to discover it.
+MINIMUM_STAGE_FOR = {
+    NoticeType.PRELIMINARY_NOTIFICATION: Stage.PRELIMINARY_NOTIFICATION,
+    NoticeType.DECLARATION: Stage.DECLARATION,
+    NoticeType.AWARD: Stage.AWARD,
+    NoticeType.POSSESSION_NOTICE: Stage.POSSESSION,
+}
+
+DEFAULT_SECTION = {
+    NoticeType.PRELIMINARY_NOTIFICATION: "Section 11(1)",
+    NoticeType.DECLARATION: "Section 19(1)",
+    NoticeType.AWARD: "Section 23",
+    NoticeType.POSSESSION_NOTICE: "Section 38(1)",
+}
+
+STAGE_SEQUENCE = list(Stage)
+
+
+@router.get("/register", response_model=StatutoryNoticeList)
+def notice_register(
+    case_id: int = Query(description="Case whose issued instruments to list"),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """Every instrument issued on one case, in issue order.
+
+    Authenticated and case-scoped, unlike the public board above: this is the
+    internal register, and it carries the issuing officer and the gazette
+    reference.
+    """
+    case = scope_cases_to_user(db.query(Case), user).filter(Case.id == case_id).first()
+    if case is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
+
+    rows = (
+        db.query(StatutoryNotice)
+        .filter(StatutoryNotice.case_id == case_id)
+        .order_by(StatutoryNotice.issued_on.asc(), StatutoryNotice.id.asc())
+        .all()
+    )
+    return StatutoryNoticeList(
+        items=[
+            StatutoryNoticeOut(**{
+                **{c.name: getattr(row, c.name) for c in row.__table__.columns},
+                "case_number": case.case_number,
+            })
+            for row in rows
+        ],
+        total=len(rows),
+    )
+
+
+@router.post("/register", response_model=StatutoryNoticeOut, status_code=status.HTTP_201_CREATED)
+def issue_notice(
+    payload: StatutoryNoticeCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(*NOTICE_ISSUERS)),
+):
+    """Record that an instrument has been published.
+
+    Refuses to issue one twice for the same case: a second preliminary
+    notification on the same acquisition is not a second notification, it is
+    a duplicate, and it would inflate the national count by exactly as much
+    as somebody double-clicks.
+    """
+    case = scope_cases_to_user(db.query(Case), user).filter(Case.id == payload.case_id).first()
+    if case is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
+
+    minimum = MINIMUM_STAGE_FOR[payload.notice_type]
+    if STAGE_SEQUENCE.index(case.stage) < STAGE_SEQUENCE.index(minimum):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot issue a {payload.notice_type.value} on a case at "
+                f"'{case.stage.value}'. The case must have reached '{minimum.value}'."
+            ),
+        )
+
+    existing = (
+        db.query(StatutoryNotice.id)
+        .filter(
+            StatutoryNotice.case_id == payload.case_id,
+            StatutoryNotice.notice_type == payload.notice_type,
+        )
+        .first()
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"A {payload.notice_type.value} has already been issued on this case",
+        )
+
+    if payload.notice_type is not NoticeType.AWARD and (
+        payload.beneficiary_count is not None or payload.total_amount is not None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="beneficiary_count and total_amount apply only to an award notice",
+        )
+
+    notice = StatutoryNotice(
+        case_id=payload.case_id,
+        notice_type=payload.notice_type,
+        section_reference=payload.section_reference or DEFAULT_SECTION[payload.notice_type],
+        gazette_number=payload.gazette_number,
+        issuing_authority=payload.issuing_authority,
+        issued_on=payload.issued_on or date.today(),
+        document_id=payload.document_id,
+        issued_by_user_id=user.id,
+        beneficiary_count=payload.beneficiary_count,
+        total_amount=payload.total_amount,
+    )
+    db.add(notice)
+    db.flush()
+
+    audit.record(
+        db,
+        user,
+        action="notice.issue",
+        entity_type="statutory_notice",
+        entity_id=notice.id,
+        detail=f"{payload.notice_type.value} on case {payload.case_id} ({notice.section_reference})",
+    )
+    db.commit()
+    db.refresh(notice)
+
+    return StatutoryNoticeOut(**{
+        **{c.name: getattr(notice, c.name) for c in notice.__table__.columns},
+        "case_number": case.case_number,
+    })
