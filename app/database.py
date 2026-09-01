@@ -1,8 +1,24 @@
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.pool import NullPool
 
 from app.config import settings
+
+
+# Query parameters that appear in the connection strings managed hosts hand
+# out, but that libpq does not recognise. psycopg2 forwards every query
+# parameter to libpq as a connection option, and libpq rejects an unknown one
+# outright rather than ignoring it — so leaving these in fails the connection.
+#
+# `pgbouncer=true` is Prisma's. Supabase prints it on the transaction pooler
+# string in the dashboard whatever client you picked, so the obvious paste
+# carries it, and the resulting `invalid connection option "pgbouncer"` names
+# a parameter the app never set. Dropping it loses nothing: the pooler is
+# already detected below by port and host, and NullPool is the behaviour that
+# flag was asking for.
+_UNSUPPORTED_QUERY_PARAMS = {"pgbouncer"}
 
 
 def _normalise(url: str) -> str:
@@ -14,10 +30,19 @@ def _normalise(url: str) -> str:
     with a dialect error that reads like a bug in the app.
     """
     if url.startswith("postgres://"):
-        return url.replace("postgres://", "postgresql+psycopg2://", 1)
-    if url.startswith("postgresql://"):
-        return url.replace("postgresql://", "postgresql+psycopg2://", 1)
-    return url
+        url = url.replace("postgres://", "postgresql+psycopg2://", 1)
+    elif url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+psycopg2://", 1)
+
+    parts = urlsplit(url)
+    if not parts.query:
+        return url
+
+    params = parse_qsl(parts.query, keep_blank_values=True)
+    kept = [(k, v) for k, v in params if k.lower() not in _UNSUPPORTED_QUERY_PARAMS]
+    if len(kept) == len(params):
+        return url
+    return urlunsplit(parts._replace(query=urlencode(kept)))
 
 
 DATABASE_URL = _normalise(settings.database_url)
