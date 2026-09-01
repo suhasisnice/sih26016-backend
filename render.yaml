@@ -44,8 +44,15 @@ services:
       # The deployed frontend's origin. Comma-separated if more than one.
       # Must not be "*" — the config guard refuses to boot on a wildcard,
       # because credentialed requests cannot use one anyway.
+      #
+      # Pinned rather than `sync: false` now that the frontend blueprint
+      # pins its own service name, so this URL is known ahead of the
+      # service existing. Getting it wrong does not fail the deploy: the
+      # API keeps answering curl perfectly while every browser request
+      # fails CORS, which is a slow thing to diagnose and a fast thing to
+      # avoid.
       - key: FRONTEND_ORIGIN
-        sync: false
+        value: https://sih26016-frontend.onrender.com
 
     # Uploaded documents land in /app/uploads, which is ephemeral on the
     # free plan — every deploy and every wake-from-sleep starts with an
