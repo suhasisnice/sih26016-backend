@@ -23,3 +23,9 @@ python-multipart==0.0.32
 passlib[bcrypt]==1.7.4
 bcrypt==4.0.1
 pyjwt==2.13.0
+
+# Schema migrations. Every schema change from Phase 1 onward is a revision
+# in alembic/versions; nothing calls create_all() any more. The container
+# runs `alembic upgrade head` before uvicorn starts, so a deploy migrates
+# itself rather than depending on somebody remembering to.
+alembic==1.19.1
