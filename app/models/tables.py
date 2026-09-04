@@ -225,14 +225,23 @@ class Parcel(Base):
     # viewport query filters on — a parcel is a few hundred metres across, so
     # filtering by its centre and filtering by its outline select the same
     # rows, and the centre has the index.
-    geom = mapped_column(Geometry(geometry_type="POINT", srid=4326), nullable=False)
+    # spatial_index=False because the GiST index is declared explicitly
+    # below. Left at its default, GeoAlchemy2 quietly creates a SECOND
+    # index (idx_parcels_geom) beside ours — the deployed database has
+    # both, which is one index's worth of write cost for nothing, and it
+    # is invisible until somebody diffs the schema.
+    geom = mapped_column(
+        Geometry(geometry_type="POINT", srid=4326, spatial_index=False), nullable=False
+    )
     # The surveyed outline, when there is one. Nullable on purpose: a field
     # officer standing in a plot with a phone can give a GPS fix and cannot
     # give a boundary, so a parcel registered from the field has a point and
     # no polygon until a survey is attached. The map falls back to drawing
     # the point, which is honest — an outline nobody surveyed should not be
     # drawn as though somebody had.
-    boundary = mapped_column(Geometry(geometry_type="POLYGON", srid=4326), nullable=True)
+    boundary = mapped_column(
+        Geometry(geometry_type="POLYGON", srid=4326, spatial_index=False), nullable=True
+    )
 
     case: Mapped[Case] = relationship(back_populates="parcels")
     owner: Mapped[Person] = relationship()
