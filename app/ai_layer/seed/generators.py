@@ -12,7 +12,7 @@ from datetime import date, timedelta
 
 from app.ai_layer import constants as c
 from app.ai_layer.seed import reference as ref
-from app.ai_layer.seed.geo import random_point_wkt
+from app.ai_layer.seed.geo import case_site, parcel_polygon_wkt, parcel_positions, rng_for
 from app.core.enums import (
     CaseStatus,
     CompensationStatus,
@@ -442,12 +442,14 @@ def generate_parcels(
     cases: list[Case],
     people: list[Person],
     districts: dict[str, District],
+    villages: dict[str, Village],
     rng: random.Random,
 ) -> tuple[dict[int, list[Person]], dict[tuple[int, int], float]]:
     """Returns case.id -> its unique owners, and (case.id, owner.id) -> the
     hectares that owner holds in the case, so compensation can be priced off
     land actually owned rather than a second unrelated random number."""
     district_name_by_id = {d.id: name for name, d in districts.items()}
+    village_name_by_id = {v.id: name for name, v in villages.items()}
 
     landowners_by_village: dict[int, list[Person]] = {}
     for person in people:
@@ -467,8 +469,30 @@ def generate_parcels(
         candidates = landowners_by_village.get(case.village_id) or all_landowners
         district_name = district_name_by_id[case.district_id]
 
+        # One site per case, with the case's parcels laid out contiguously
+        # around it, on the farmland outside the case's OWN village.
+        #
+        # Previously every parcel took an independent random point anywhere in
+        # the district. That was wrong twice over: the plots of a single
+        # acquisition sat up to 40 km apart, so "click a project and see its
+        # plots" showed a scatter rather than a corridor or a block; and a
+        # uniform draw inside a district box lands in reservoirs, which put
+        # parcels on open water the moment there was a real basemap under
+        # them. Anchoring on the village fixes both, and makes the geometry
+        # agree with the village_id the case already carries.
+        # Geometry runs off a generator private to this case rather than the
+        # shared one. Rejection sampling against the water list consumes a
+        # variable number of draws, so on the shared rng one exclusion shifted
+        # every later case's position, area and survey number — which made
+        # "fix the parcels that landed in water" a game of whack-a-mole that
+        # could not converge. See geo.rng_for.
+        geo_rng = rng_for(case.case_number)
+        village_name = village_name_by_id[case.village_id]
+        site_lat, site_lon = case_site(village_name, district_name, geo_rng)
+        positions = parcel_positions(site_lat, site_lon, parcel_count, geo_rng)
+
         owner_ids = set()
-        for _ in range(parcel_count):
+        for (parcel_lat, parcel_lon) in positions:
             owner = rng.choice(candidates)
             owner_ids.add(owner.id)
 
@@ -484,7 +508,10 @@ def generate_parcels(
                     area_ha=area_ha,
                     owner_id=owner.id,
                     status=_parcel_status_for(case, rng),
-                    geom=random_point_wkt(district_name, rng),
+                    geom=f"SRID=4326;POINT({parcel_lon} {parcel_lat})",
+                    # Scaled to area_ha, so ST_Area on this polygon returns
+                    # the hectares the dashboard is totalling for the parcel.
+                    boundary=parcel_polygon_wkt(parcel_lat, parcel_lon, area_ha, geo_rng),
                 )
             )
             key = (case.id, owner.id)
@@ -626,29 +653,86 @@ def generate_required_documents(session) -> None:
 
 def generate_documents(session, cases: list[Case], rng: random.Random, anchor: date) -> None:
     """Every case gets its current stage's required documents, complete.
-    Gaps are anomalies.py's job alone."""
+    Gaps are anomalies.py's job alone.
+
+    A minority are filed twice, so the repository's version control is
+    visible in seeded data rather than only reachable by uploading something
+    during a demo. A superseded document keeps its row, its place in the
+    trail and its bytes; only is_current moves. Corrected award copies and
+    re-issued survey maps are the commonest real example, which is why the
+    revision is attached to a document type rather than sprinkled at random.
+
+    **Every extra draw comes off a per-document generator, never the shared
+    one.** The revision decision and the replacement's date and size are
+    derived from the case number and doc type, so this function consumes
+    exactly the same values from `rng` as it did before revisions existed.
+    That matters more than it looks: the shared stream also decides which
+    proposals get approved, and drawing two extra numbers here re-rolled that
+    far downstream — one sanctioned proposal produced a case with no
+    documents at all, which showed up as a fourth missing-document alert that
+    anomalies.py had not asked for. Seeded flaws are anomalies.py's job
+    alone; a generator that quietly adds one has broken the only property
+    that makes the alert counts mean anything.
+    """
+    # Types where a corrected re-issue is ordinary rather than remarkable.
+    REVISABLE = {DocType.AWARD_COPY, DocType.SURVEY_MAP, DocType.LAND_RECORD}
+
+    def _document(
+        case, doc_type, uploaded_on, version, is_current, size_bytes, supersedes_id=None
+    ):
+        return Document(
+            case_id=case.id,
+            doc_type=doc_type,
+            filename=(
+                f"{doc_type.value}_{case.case_number.replace('/', '_')}"
+                f"{'' if version == 1 else f'_rev{version}'}.pdf"
+            ),
+            stored_name=f"seed_{case.id}_{doc_type.value}_v{version}.pdf",
+            content_type="application/pdf",
+            size_bytes=size_bytes,
+            uploaded_by_user_id=None,
+            uploaded_on=uploaded_on,
+            version=version,
+            is_current=is_current,
+            supersedes_id=supersedes_id,
+            # Seeded documents have no real bytes on disk, so they have no
+            # hash. Left null rather than filled with a plausible-looking
+            # fake: a checksum that does not match anything is worse than an
+            # absent one.
+            sha256=None,
+        )
+
     for case in cases:
         for doc_type in ref.REQUIRED_DOCUMENTS.get(case.stage, []):
+            # These two draws, in this order, are what the original filed —
+            # they stay on the shared generator so the stream is unchanged.
             uploaded_on = min(
                 anchor, case.stage_changed_at + timedelta(days=rng.randint(0, 5))
             )
+            size_bytes = rng.randint(80_000, 2_400_000)
+
+            doc_rng = rng_for(f"docrev:{case.case_number}:{doc_type.value}")
+            revised = doc_type in REVISABLE and doc_rng.random() < 0.35
+            if not revised:
+                session.add(_document(case, doc_type, uploaded_on, 1, True, size_bytes))
+                continue
+
+            # The original goes in first and is flushed, so the replacement
+            # can point at a real id — supersedes_id is the link that makes
+            # the chain navigable rather than a list of rows that happen to
+            # share a doc_type.
+            original = _document(case, doc_type, uploaded_on, 1, False, size_bytes)
+            session.add(original)
+            session.flush()
             session.add(
-                Document(
-                    case_id=case.id,
-                    doc_type=doc_type,
-                    filename=f"{doc_type.value}_{case.case_number.replace('/', '_')}.pdf",
-                    stored_name=f"seed_{case.id}_{doc_type.value}.pdf",
-                    content_type="application/pdf",
-                    size_bytes=rng.randint(80_000, 2_400_000),
-                    uploaded_by_user_id=None,
-                    uploaded_on=uploaded_on,
-                    version=1,
-                    is_current=True,
-                    # Seeded documents have no real bytes on disk, so they
-                    # have no hash. Left null rather than filled with a
-                    # plausible-looking fake: a checksum that does not match
-                    # anything is worse than an absent one.
-                    sha256=None,
+                _document(
+                    case,
+                    doc_type,
+                    min(anchor, uploaded_on + timedelta(days=doc_rng.randint(4, 40))),
+                    2,
+                    True,
+                    doc_rng.randint(80_000, 2_400_000),
+                    supersedes_id=original.id,
                 )
             )
     session.flush()

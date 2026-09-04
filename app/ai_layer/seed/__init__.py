@@ -150,7 +150,7 @@ def run_seed(rebuild: bool = False, allow_remote: bool = False) -> dict:
         cases = generate_cases(session, projects, districts, villages, states, rng, anchor)
         generate_stage_history(session, cases)
         owners_by_case, area_by_case_owner = generate_parcels(
-            session, cases, people, districts, rng
+            session, cases, people, districts, villages, rng
         )
         landless_by_case = generate_affected_families(session, cases, owners_by_case, people, rng)
         generate_compensation_and_rnr(

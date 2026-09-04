@@ -5,6 +5,8 @@ custom shape, so Frontend can hand the response straight to a map component
 without translating it first.
 """
 
+from typing import Annotated, Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.enums import ParcelStatus
@@ -24,9 +26,34 @@ class ParcelOut(BaseModel):
     latitude: float
 
 
-class ParcelGeometry(BaseModel):
-    type: str = "Point"
+class PointGeometry(BaseModel):
+    """A parcel with a GPS fix and no survey attached."""
+
+    type: Literal["Point"] = "Point"
     coordinates: list[float]  # [longitude, latitude], per the GeoJSON spec
+
+
+class PolygonGeometry(BaseModel):
+    """A surveyed parcel outline.
+
+    Nesting is the GeoJSON spec's, not ours: a Polygon is a list of linear
+    rings, the first being the exterior and any others holes, and each ring
+    is a list of [lon, lat] pairs whose last point repeats its first. Parcels
+    have no holes, so the outer list always has exactly one entry — but the
+    shape has to be the spec's, because the whole point of returning real
+    GeoJSON is that a map component consumes it without translation.
+    """
+
+    type: Literal["Polygon"] = "Polygon"
+    coordinates: list[list[list[float]]]
+
+
+# Discriminated on `type`, so a client reading the OpenAPI schema is told
+# which of the two it is getting rather than having to sniff the payload.
+ParcelGeometry = Annotated[
+    PointGeometry | PolygonGeometry,
+    Field(discriminator="type"),
+]
 
 
 class ParcelProperties(BaseModel):
@@ -37,6 +64,17 @@ class ParcelProperties(BaseModel):
     area_ha: float
     status: ParcelStatus
     owner_name: str
+    # The centre, always, even when `geometry` is the polygon. A map needs a
+    # point to anchor a label, to fly to on a search hit, and to draw at zoom
+    # levels where a 0.4 ha plot is smaller than one screen pixel. Deriving
+    # it in the browser from the ring would mean every client reimplementing
+    # a centroid, and getting it slightly differently.
+    longitude: float
+    latitude: float
+    # Whether `geometry` above is a surveyed outline or just the fix. The map
+    # says so in the sidebar; a reviewer is entitled to know which they are
+    # looking at.
+    has_boundary: bool = False
 
 
 class ParcelFeature(BaseModel):

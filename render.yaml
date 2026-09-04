@@ -51,6 +51,18 @@ services:
       # API keeps answering curl perfectly while every browser request
       # fails CORS, which is a slow thing to diagnose and a fast thing to
       # avoid.
+      # How often the alert rules re-run themselves. Without this the rules
+      # only ever fire when somebody calls POST /admin/run-rules, which makes
+      # "the system notices something is overdue" depend on a human
+      # remembering to ask it to notice. 60 minutes is far tighter than the
+      # daily cadence a revenue office actually works to, and the sweep is
+      # idempotent, so over-running costs nothing.
+      #
+      # A platform cron job calling `python -m app.services.scheduler` is the
+      # better shape where the plan includes one; this works on every tier.
+      - key: RULES_INTERVAL_MINUTES
+        value: "60"
+
       - key: FRONTEND_ORIGIN
         # Both origins during the rename: Render creates a new service
         # rather than renaming the old one, so the two coexist until

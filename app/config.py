@@ -30,6 +30,20 @@ class Settings(BaseSettings):
     # Cap on uploaded documents, enforced in the documents router.
     max_upload_bytes: int = 10 * 1024 * 1024
 
+    # Which external land-record portal the integration talks to. "mock" is a
+    # simulation and says so on every response it produces — see
+    # app/integrations. A deployment with real credentials for a state
+    # revenue portal points this at that adapter instead; nothing else in the
+    # application changes.
+    land_records_provider: str = "mock"
+
+    # How often the alert rules re-run themselves, in minutes. 0 disables the
+    # in-process scheduler — the default, so a developer working against a
+    # seeded database does not get the alert table rewritten underneath them.
+    # A deployment sets this (60 is sensible) so that "the system notices
+    # something is overdue" does not depend on somebody calling an endpoint.
+    rules_interval_minutes: int = 0
+
     # Login attempts allowed per IP per window, enforced in the auth router.
     # Generous enough that a demo never trips it, tight enough that a
     # password guesser gets nowhere.

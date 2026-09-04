@@ -1,5 +1,7 @@
+import json
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from geoalchemy2.functions import ST_MakeEnvelope, ST_X, ST_Y
+from geoalchemy2.functions import ST_AsGeoJSON, ST_MakeEnvelope, ST_X, ST_Y
 from sqlalchemy.orm import Session
 
 from app.core.enums import ParcelStatus, Role
@@ -8,10 +10,15 @@ from app.models import Case, Parcel, Person, User
 from app.schemas import (
     ParcelFeature,
     ParcelFeatureCollection,
-    ParcelGeometry,
     ParcelOut,
 )
-from app.schemas.geo import ParcelCreate, ParcelProperties, ParcelUpdate
+from app.schemas.geo import (
+    ParcelCreate,
+    ParcelProperties,
+    ParcelUpdate,
+    PointGeometry,
+    PolygonGeometry,
+)
 from app.services import audit
 
 router = APIRouter(prefix="/parcels", tags=["parcels"])
@@ -31,6 +38,20 @@ def _visible_case_ids(db: Session, user: User):
     return scope_cases_to_user(db.query(Case.id), user).subquery().select()
 
 
+def _geometry(boundary_geojson: str | None, lon: float, lat: float):
+    """The best shape we have for this parcel.
+
+    The surveyed outline when there is one, the GPS fix when there is not.
+    ST_AsGeoJSON hands back the geometry member as a JSON string — parsed
+    rather than passed through as text, because the response model has to
+    validate it and a string would serialise as a quoted blob the map would
+    have to JSON.parse a second time.
+    """
+    if boundary_geojson:
+        return PolygonGeometry(coordinates=json.loads(boundary_geojson)["coordinates"])
+    return PointGeometry(coordinates=[lon, lat])
+
+
 @router.get("/bbox", response_model=ParcelFeatureCollection)
 def parcels_in_bbox(
     db: Session = Depends(get_db),
@@ -40,12 +61,24 @@ def parcels_in_bbox(
     max_lon: float = Query(ge=-180, le=180),
     max_lat: float = Query(ge=-90, le=90),
     parcel_status: ParcelStatus | None = None,
+    case_id: int | None = Query(
+        default=None,
+        description="Only this case's parcels — what 'show me this project's plots' asks for.",
+    ),
 ):
     """Parcels inside the map's current viewport, as GeoJSON.
 
     The spatial filter runs in PostGIS against the GiST index, so the
     database returns only what is on screen instead of the API loading
     every parcel and discarding most of them.
+
+    Each feature's geometry is the parcel's surveyed outline where one is on
+    file, and its GPS fix where one is not. The filter above tests the fix
+    either way: a parcel is a few hundred metres across, so filtering by
+    centre and filtering by outline select the same rows at every zoom a
+    person actually uses, and only the centre has an index that a bounding
+    box can drive. The alternative — COALESCE(boundary, geom) — is correct to
+    the pixel and gives up the index scan to be so.
     """
     if min_lon >= max_lon or min_lat >= max_lat:
         raise HTTPException(
@@ -55,7 +88,14 @@ def parcels_in_bbox(
 
     envelope = ST_MakeEnvelope(min_lon, min_lat, max_lon, max_lat, 4326)
     query = (
-        db.query(Parcel, Case.case_number, Person.name, ST_X(Parcel.geom), ST_Y(Parcel.geom))
+        db.query(
+            Parcel,
+            Case.case_number,
+            Person.name,
+            ST_X(Parcel.geom),
+            ST_Y(Parcel.geom),
+            ST_AsGeoJSON(Parcel.boundary),
+        )
         .join(Case, Parcel.case_id == Case.id)
         .join(Person, Parcel.owner_id == Person.id)
         .filter(Parcel.geom.ST_Intersects(envelope))
@@ -63,6 +103,11 @@ def parcels_in_bbox(
     )
     if parcel_status is not None:
         query = query.filter(Parcel.status == parcel_status)
+    if case_id is not None:
+        # Not checked against the entitlement separately: the case-id filter
+        # can only narrow the visible set above, so an unentitled case_id
+        # returns nothing rather than leaking that it exists.
+        query = query.filter(Parcel.case_id == case_id)
 
     # Fetch one extra to detect truncation without a second count query.
     rows = query.order_by(Parcel.id).limit(BBOX_FEATURE_LIMIT + 1).all()
@@ -71,7 +116,7 @@ def parcels_in_bbox(
 
     features = [
         ParcelFeature(
-            geometry=ParcelGeometry(coordinates=[float(lon), float(lat)]),
+            geometry=_geometry(boundary, float(lon), float(lat)),
             properties=ParcelProperties(
                 id=parcel.id,
                 case_id=parcel.case_id,
@@ -80,9 +125,12 @@ def parcels_in_bbox(
                 area_ha=parcel.area_ha,
                 status=parcel.status,
                 owner_name=owner_name,
+                longitude=float(lon),
+                latitude=float(lat),
+                has_boundary=boundary is not None,
             ),
         )
-        for parcel, case_number, owner_name, lon, lat in rows
+        for parcel, case_number, owner_name, lon, lat, boundary in rows
     ]
     return ParcelFeatureCollection(features=features, truncated=truncated)
 
