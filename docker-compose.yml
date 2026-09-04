@@ -50,6 +50,12 @@ services:
     volumes:
       - ./app:/app/app
       - ./scripts:/app/scripts
+      # Mounted rather than baked in for development, so a revision
+      # written on the host is visible to `docker compose exec api
+      # alembic ...` without rebuilding the image first.
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./tests:/app/tests
       - ./uploads:/app/uploads
     depends_on:
       db:

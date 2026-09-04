@@ -20,6 +20,11 @@ RUN pip install --no-cache-dir -r requirements.txt \
 
 COPY ./app ./app
 COPY ./scripts ./scripts
+# The migrations are part of the image, not something applied out of
+# band. A container that can serve the app can always bring its own
+# schema up to head first.
+COPY ./alembic ./alembic
+COPY ./alembic.ini ./alembic.ini
 
 # Uploaded documents live here. On Render this is ephemeral unless a disk
 # is attached — see DEPLOYMENT.md, which says so plainly rather than
@@ -38,4 +43,12 @@ EXPOSE 8000
 # instead of the server -- no graceful shutdown, just a SIGKILL once the
 # grace period runs out, mid-request. `exec` replaces the shell with
 # uvicorn so the signal lands on the process that can act on it.
-CMD ["sh", "-c", "exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# `alembic upgrade head` runs first and is not backgrounded: if the
+# migration fails the container exits non-zero and the deploy is
+# marked failed, which is the correct outcome. Starting the API
+# against a schema that did not migrate would serve 500s that read
+# like code bugs.
+#
+# It is idempotent — on an already-current database alembic reads
+# one row from alembic_version and returns.
+CMD ["sh", "-c", "alembic upgrade head && exec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

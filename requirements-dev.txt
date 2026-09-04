@@ -1,0 +1,13 @@
+# Test-only dependencies. Not installed into the deployed image — the
+# Dockerfile installs requirements.txt alone, so pytest and its transitive
+# tree never reach production.
+#
+#   pip install -r requirements.txt -r requirements-dev.txt
+#
+# httpx is not a test framework but is required by it: fastapi's TestClient
+# is a thin wrapper over httpx.Client and raises at import without it.
+
+-r requirements.txt
+
+pytest==9.1.1
+httpx==0.28.1
