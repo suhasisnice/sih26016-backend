@@ -221,7 +221,18 @@ class Parcel(Base):
     area_ha: Mapped[float] = mapped_column(Float, nullable=False)
     owner_id: Mapped[int] = mapped_column(ForeignKey("people.id"), nullable=False, index=True)
     status: Mapped[ParcelStatus] = mapped_column(_enum(ParcelStatus, "parcel_status"), nullable=False)
+    # Where the parcel is. Always present, and always the thing the map's
+    # viewport query filters on — a parcel is a few hundred metres across, so
+    # filtering by its centre and filtering by its outline select the same
+    # rows, and the centre has the index.
     geom = mapped_column(Geometry(geometry_type="POINT", srid=4326), nullable=False)
+    # The surveyed outline, when there is one. Nullable on purpose: a field
+    # officer standing in a plot with a phone can give a GPS fix and cannot
+    # give a boundary, so a parcel registered from the field has a point and
+    # no polygon until a survey is attached. The map falls back to drawing
+    # the point, which is honest — an outline nobody surveyed should not be
+    # drawn as though somebody had.
+    boundary = mapped_column(Geometry(geometry_type="POLYGON", srid=4326), nullable=True)
 
     case: Mapped[Case] = relationship(back_populates="parcels")
     owner: Mapped[Person] = relationship()
@@ -229,6 +240,11 @@ class Parcel(Base):
 
 # Spatial index — without it the map's bbox query does a full table scan.
 Index("ix_parcels_geom", Parcel.geom, postgresql_using="gist")
+# The boundary is not what the viewport query filters on (see `geom` above),
+# but it is what ST_Area, ST_Intersects and any future overlap check read, so
+# it gets its own index rather than forcing a sequential scan the first time
+# somebody asks a real spatial question of it.
+Index("ix_parcels_boundary", Parcel.boundary, postgresql_using="gist")
 
 
 class Compensation(Base):
