@@ -1,12 +1,16 @@
+import base64
+import binascii
+
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
 from sqlalchemy import func
 
+from app.core.enums import BiometricKind, Role
 from app.core.security import create_access_token, hash_password, verify_password
 from app.dependencies import get_current_user, get_db
-from app.models import User
+from app.models import BiometricCredential, User
 from app.schemas import LoginResponse, UserOut
 from app.schemas.invite import (
     InviteCheck,
@@ -14,7 +18,7 @@ from app.schemas.invite import (
     RegisterRequest,
     RegisterResponse,
 )
-from app.services import audit, invites, ratelimit
+from app.services import audit, face, invites, ratelimit
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -117,6 +121,31 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     if invite is None:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=reason)
 
+    # Face sign-in is mandatory for every role except landowner — a
+    # landowner account has no camera or scanner enrolled against it and
+    # never will, the same line Login.jsx and Signup.jsx already draw.
+    # Enforced here, not just on the form: a hidden or skipped field on the
+    # client is a courtesy, not a control.
+    if invite.role != Role.LANDOWNER and not payload.face_image_base64:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Face capture is required to create this account.",
+        )
+
+    # Validated and extracted before anything is written, so a bad photo
+    # fails the whole registration cleanly rather than leaving a user row
+    # behind with no working sign-in method.
+    face_embedding = None
+    if payload.face_image_base64:
+        try:
+            image_bytes = base64.b64decode(payload.face_image_base64, validate=True)
+        except (ValueError, binascii.Error):
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "That isn't valid base64 image data.")
+        try:
+            face_embedding = face.extract_embedding(image_bytes)
+        except face.FaceCaptureError as exc:
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
     username = payload.username.strip().lower()
     if db.query(User).filter(func.lower(User.username) == username).first() is not None:
         raise HTTPException(
@@ -144,6 +173,17 @@ def register(payload: RegisterRequest, db: Session = Depends(get_db)):
     # cannot consume an invitation without creating the user it was for.
     invite.used_count += 1
     db.flush()
+
+    if face_embedding is not None:
+        db.add(
+            BiometricCredential(
+                user_id=user.id,
+                kind=BiometricKind.FACE,
+                template=face.serialise(face_embedding),
+                algorithm=face.ALGORITHM,
+                is_active=True,
+            )
+        )
 
     audit.record(
         db,
