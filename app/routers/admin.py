@@ -1,5 +1,7 @@
 """Administrative operations. Admin role only, every one of them audited."""
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -109,6 +111,15 @@ def create_invite_code(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="A requiring-body invitation needs the organisation it files for",
+        )
+
+    # An expiry in the past would mint a code that is dead on arrival —
+    # invites.redeem_reason rejects it on the very first attempt, which looks
+    # like a bug to whoever issued it rather than the input mistake it is.
+    if payload.expires_on is not None and payload.expires_on < date.today():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="The expiry date is in the past — choose today or later, or leave it blank for a code that never expires",
         )
 
     invite, code = invites.issue(
