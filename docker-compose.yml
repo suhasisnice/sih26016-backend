@@ -1,0 +1,65 @@
+services:
+  db:
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: sih26016
+      POSTGRES_PASSWORD: sih26016
+      POSTGRES_DB: sih26016
+    ports:
+      # Loopback only. "5432:5432" listens on every interface, which on
+      # shared venue wifi hands the database to anyone on the network —
+      # and the password is sitting in this file. The API reaches the
+      # database over the compose network, not through this published
+      # port, so nothing needs it exposed beyond this machine.
+      # Host port 5433 so this can run alongside the standalone AI Layer
+      # database on 5432. The API is unaffected — it reaches the database
+      # as db:5432 over the compose network.
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-extensions.sql:/docker-entrypoint-initdb.d/init-extensions.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sih26016"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    env_file:
+      # Optional so a fresh clone comes up before anyone has copied
+      # .env.example — config.py carries working defaults.
+      - path: .env
+        required: false
+    # DATABASE_URL is deliberately NOT set here. A value in `environment`
+    # overrides env_file, so hardcoding it made .env silently ignored.
+    # config.py already defaults to the compose-internal db host.
+    #
+    # --reload lives here rather than in the Dockerfile: the image is what
+    # gets deployed, and a file-watching reloader has no business in it.
+    # Development still gets hot reload because this overrides the command.
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./app:/app/app
+      - ./scripts:/app/scripts
+      # Mounted rather than baked in for development, so a revision
+      # written on the host is visible to `docker compose exec api
+      # alembic ...` without rebuilding the image first.
+      - ./alembic:/app/alembic
+      - ./alembic.ini:/app/alembic.ini
+      - ./tests:/app/tests
+      - ./uploads:/app/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

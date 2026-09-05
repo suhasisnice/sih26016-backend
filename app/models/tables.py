@@ -1,0 +1,804 @@
+"""The fifteen tables behind the API.
+
+Conventions that hold everywhere in here, per CLAUDE.md:
+- Column names are snake_case; enum values come from app.core.enums and are
+  never re-declared as loose strings.
+- Money is whole rupees as Integer, never Float — rounding errors in a
+  compensation figure are not acceptable in a land record.
+- Area is hectares as Float.
+- Compensation and R&R are separate tables with separate statuses. A tenant
+  farmer can be owed R&R while owning no land and receiving no
+  compensation, so one merged column could not represent them.
+"""
+
+from datetime import date, datetime
+
+from geoalchemy2 import Geometry
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy import (
+    Boolean,
+    Date,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.core.enums import (
+    AlertSeverity,
+    CaseStatus,
+    CompensationStatus,
+    DocType,
+    MutationStatus,
+    NoticeType,
+    ObjectionStatus,
+    ParcelStatus,
+    ProposalStatus,
+    RnRStatus,
+    Role,
+    Stage,
+)
+from app.database import Base
+
+
+def _enum(enum_cls, name: str):
+    """Store enums by VALUE (the lowercase string), not by python member
+    name. Without values_callable SQLAlchemy would persist "AWARD" while
+    the API returns "award", and every comparison would need translating."""
+    return Enum(enum_cls, name=name, values_callable=lambda e: [m.value for m in e])
+
+
+class User(Base):
+    __tablename__ = "users"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    username: Mapped[str] = mapped_column(String(60), nullable=False, unique=True, index=True)
+    full_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    role: Mapped[Role] = mapped_column(_enum(Role, "role"), nullable=False)
+    # Officers are scoped to a district; landowners and admins are not.
+    district_id: Mapped[int | None] = mapped_column(ForeignKey("districts.id"), nullable=True)
+    # A state officer works across every district of one state. Kept separate
+    # from district_id rather than overloading it: a user scoped to a state
+    # has no single district, and inventing one would silently narrow them.
+    state_id: Mapped[int | None] = mapped_column(ForeignKey("states.id"), nullable=True)
+    person_id: Mapped[int | None] = mapped_column(ForeignKey("people.id"), nullable=True)
+    # Which requiring body this account submits proposals for. Only ever set
+    # on a REQUIRING_BODY account; it is how their proposals are scoped.
+    organisation: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    district: Mapped["District | None"] = relationship()
+    state: Mapped["State | None"] = relationship()
+    state: Mapped["State | None"] = relationship()
+
+
+class State(Base):
+    """A State or Union Territory.
+
+    Districts previously carried their state as a free-text column that no
+    query ever read, which made "state-wise progress" unanswerable. Modelling
+    it properly is also what makes the platform nationwide rather than
+    Karnataka-shaped: the case-number prefix now comes from this row instead
+    of a hardcoded "KA/".
+
+    `lgd_code` is the Local Government Directory code — the identifier every
+    other Indian government system joins states and districts on. Carrying it
+    is the cheapest interoperability win available, and it costs one column.
+    """
+
+    __tablename__ = "states"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    # Two-letter code used as the case-number prefix: KA/BRU/2026/001.
+    code: Mapped[str] = mapped_column(String(3), nullable=False, unique=True)
+    lgd_code: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
+    is_union_territory: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    districts: Mapped[list["District"]] = relationship(back_populates="state")
+
+
+class District(Base):
+    __tablename__ = "districts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False, unique=True)
+    state_id: Mapped[int] = mapped_column(ForeignKey("states.id"), nullable=False, index=True)
+    # Short code used in case numbers (KA/BRU/2026/001). Stored rather than
+    # derived from the name, so the seed and the create-case route cannot
+    # abbreviate the same district two different ways.
+    code: Mapped[str] = mapped_column(String(4), nullable=False, unique=True)
+    lgd_code: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
+
+    state: Mapped[State] = relationship(back_populates="districts")
+    villages: Mapped[list["Village"]] = relationship(back_populates="district")
+
+
+class Village(Base):
+    __tablename__ = "villages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(80), nullable=False)
+    district_id: Mapped[int] = mapped_column(ForeignKey("districts.id"), nullable=False, index=True)
+    lgd_code: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
+
+    district: Mapped[District] = relationship(back_populates="villages")
+
+
+class Project(Base):
+    __tablename__ = "projects"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(160), nullable=False)
+    requiring_body: Mapped[str] = mapped_column(String(120), nullable=False)
+    district_id: Mapped[int] = mapped_column(ForeignKey("districts.id"), nullable=False, index=True)
+
+    district: Mapped[District] = relationship()
+
+
+class Person(Base):
+    """An individual on record. Whether they are affected by a particular
+    case lives in AffectedFamily, not here — the same person can be
+    affected by one acquisition and not another."""
+
+    __tablename__ = "people"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    village_id: Mapped[int] = mapped_column(ForeignKey("villages.id"), nullable=False, index=True)
+    phone: Mapped[str | None] = mapped_column(String(15), nullable=True)
+    has_land_title: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    village: Mapped[Village] = relationship()
+
+
+class Case(Base):
+    __tablename__ = "cases"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_number: Mapped[str] = mapped_column(String(40), nullable=False, unique=True, index=True)
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    project_id: Mapped[int] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
+    district_id: Mapped[int] = mapped_column(ForeignKey("districts.id"), nullable=False, index=True)
+    village_id: Mapped[int] = mapped_column(ForeignKey("villages.id"), nullable=False, index=True)
+    stage: Mapped[Stage] = mapped_column(_enum(Stage, "stage"), nullable=False, index=True)
+    status: Mapped[CaseStatus] = mapped_column(_enum(CaseStatus, "case_status"), nullable=False)
+    # Read by every alert rule that asks "how long has this sat still".
+    stage_changed_at: Mapped[date] = mapped_column(Date, nullable=False)
+    # When the current stage is due to complete, from the stage_sla table.
+    # Denormalised deliberately: timeline adherence is a dashboard-wide
+    # aggregate, and recomputing it per case would mean joining stage_sla on
+    # every KPI query. app.services.sla owns this column and nothing else
+    # writes it, so it cannot drift from the stage it describes.
+    stage_due_on: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+    created_at: Mapped[date] = mapped_column(Date, nullable=False)
+    # Sec. 2(2): 70% of affected families for a PPP project, 80% for a
+    # private company. Null for a project needing no consent (government
+    # undertakings acquiring under Sec. 2(1) are exempt from this gate).
+    # The obtained side is never a stored count — it's read off
+    # affected_families.consent_given, the same way every other progress
+    # figure in this system is a live aggregate, not a typed-in number.
+    consent_threshold_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # NOTE: the link to an originating proposal lives on proposals.case_id,
+    # in that direction only. Modelling it on both tables made the schema
+    # circular (neither could be created before the other) and, worse, gave
+    # one relationship two columns that could disagree with no way to tell
+    # which was right. A case finds its proposal with one indexed lookup.
+
+    project: Mapped[Project] = relationship()
+    district: Mapped[District] = relationship()
+    village: Mapped[Village] = relationship()
+    parcels: Mapped[list["Parcel"]] = relationship(back_populates="case")
+
+
+class CaseStageHistory(Base):
+    """Append-only record of every stage transition. Distinct from the
+    audit log: this is the case's legal timeline, which Frontend draws as
+    the stage timeline component."""
+
+    __tablename__ = "case_stage_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id"), nullable=False, index=True)
+    from_stage: Mapped[Stage | None] = mapped_column(_enum(Stage, "stage"), nullable=True)
+    to_stage: Mapped[Stage] = mapped_column(_enum(Stage, "stage"), nullable=False)
+    changed_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    changed_on: Mapped[date] = mapped_column(Date, nullable=False)
+    note: Mapped[str | None] = mapped_column(String(300), nullable=True)
+
+
+class Parcel(Base):
+    """One piece of land. Status is per parcel, not per case: parcels in a
+    single case genuinely do not all clear together, and both the area and
+    possession dashboard figures are counted parcel by parcel."""
+
+    __tablename__ = "parcels"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id"), nullable=False, index=True)
+    survey_number: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    # The 14-digit ULPIN (Bhu-Aadhaar) — the one identifier every state's
+    # land record and every other national system can join on. Nullable and
+    # unique: not every state has issued one for every parcel yet, but no
+    # two parcels may ever claim the same one.
+    ulpin: Mapped[str | None] = mapped_column(String(14), nullable=True, unique=True, index=True)
+    area_ha: Mapped[float] = mapped_column(Float, nullable=False)
+    owner_id: Mapped[int] = mapped_column(ForeignKey("people.id"), nullable=False, index=True)
+    status: Mapped[ParcelStatus] = mapped_column(_enum(ParcelStatus, "parcel_status"), nullable=False)
+    # Where the parcel is. Always present, and always the thing the map's
+    # viewport query filters on — a parcel is a few hundred metres across, so
+    # filtering by its centre and filtering by its outline select the same
+    # rows, and the centre has the index.
+    # spatial_index=False because the GiST index is declared explicitly
+    # below. Left at its default, GeoAlchemy2 quietly creates a SECOND
+    # index (idx_parcels_geom) beside ours — the deployed database has
+    # both, which is one index's worth of write cost for nothing, and it
+    # is invisible until somebody diffs the schema.
+    geom = mapped_column(
+        Geometry(geometry_type="POINT", srid=4326, spatial_index=False), nullable=False
+    )
+    # The surveyed outline, when there is one. Nullable on purpose: a field
+    # officer standing in a plot with a phone can give a GPS fix and cannot
+    # give a boundary, so a parcel registered from the field has a point and
+    # no polygon until a survey is attached. The map falls back to drawing
+    # the point, which is honest — an outline nobody surveyed should not be
+    # drawn as though somebody had.
+    boundary = mapped_column(
+        Geometry(geometry_type="POLYGON", srid=4326, spatial_index=False), nullable=True
+    )
+
+    case: Mapped[Case] = relationship(back_populates="parcels")
+    owner: Mapped[Person] = relationship()
+
+
+# Spatial index — without it the map's bbox query does a full table scan.
+Index("ix_parcels_geom", Parcel.geom, postgresql_using="gist")
+# The boundary is not what the viewport query filters on (see `geom` above),
+# but it is what ST_Area, ST_Intersects and any future overlap check read, so
+# it gets its own index rather than forcing a sequential scan the first time
+# somebody asks a real spatial question of it.
+Index("ix_parcels_boundary", Parcel.boundary, postgresql_using="gist")
+
+
+class Compensation(Base):
+    """Money for land taken. Never merged with RnRRecord."""
+
+    __tablename__ = "compensation"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id"), nullable=False, index=True)
+    person_id: Mapped[int] = mapped_column(ForeignKey("people.id"), nullable=False, index=True)
+    amount_awarded: Mapped[int] = mapped_column(Integer, nullable=False)
+    amount_paid: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    status: Mapped[CompensationStatus] = mapped_column(
+        _enum(CompensationStatus, "compensation_status"), nullable=False
+    )
+    awarded_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    case: Mapped[Case] = relationship()
+    person: Mapped[Person] = relationship()
+
+
+class RnRRecord(Base):
+    """Rehabilitation and resettlement entitlement. Deliberately a separate
+    table from Compensation with its own status — see the module docstring."""
+
+    __tablename__ = "rnr_records"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id"), nullable=False, index=True)
+    person_id: Mapped[int] = mapped_column(ForeignKey("people.id"), nullable=False, index=True)
+    status: Mapped[RnRStatus] = mapped_column(_enum(RnRStatus, "rnr_status"), nullable=False)
+    entitlement: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    updated_on: Mapped[date] = mapped_column(Date, nullable=False)
+
+    case: Mapped[Case] = relationship()
+    person: Mapped[Person] = relationship()
+
+
+class AffectedFamily(Base):
+    """One affected household per row, linked to the case affecting it.
+
+    The problem statement counts affected FAMILIES, which is broader than
+    landowners: a tenant farmer's household is affected while holding no
+    parcel. Owners are reachable through parcels, but landless households
+    had no link to a case at all without this table, so every case before
+    the R&R stage would have counted zero affected families.
+
+    Under the Act a household is identified as affected at the Social
+    Impact Assessment, well before entitlements are processed — so these
+    rows exist from that stage onward, independently of rnr_records, which
+    tracks entitlement progress separately.
+    """
+
+    __tablename__ = "affected_families"
+    __table_args__ = (UniqueConstraint("case_id", "person_id", name="uq_affected_family_case_person"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id"), nullable=False, index=True)
+    person_id: Mapped[int] = mapped_column(ForeignKey("people.id"), nullable=False, index=True)
+    is_landowner: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    # Affected and displaced are two different figures and the problem
+    # statement asks for both. Under the Act a family is DISPLACED when it
+    # loses its dwelling, which is not the same as losing land: a landowner
+    # farming an outlying plot is affected but not displaced, and a tenant
+    # whose house stands on the acquired parcel is displaced while owning
+    # nothing at all. One flag, because the distinction is binary in the Act.
+    is_displaced: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    # Sec. 2(2) consent — obtained from landowners for a PPP or private
+    # project, before Sec. 11. Meaningless (left False) when the case's
+    # project needs no consent; Case.consent_threshold_pct says whether it
+    # applies at all, this says whether THIS family has given it.
+    consent_given: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    case: Mapped["Case"] = relationship()
+    person: Mapped[Person] = relationship()
+
+
+class RequiredDocument(Base):
+    """Which document types each stage requires. Lookup table so the
+    missing-document rule has something authoritative to check against."""
+
+    __tablename__ = "required_documents"
+    __table_args__ = (UniqueConstraint("stage", "doc_type", name="uq_required_documents_stage_doc"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    stage: Mapped[Stage] = mapped_column(_enum(Stage, "stage"), nullable=False, index=True)
+    doc_type: Mapped[DocType] = mapped_column(_enum(DocType, "doc_type"), nullable=False)
+
+
+class Document(Base):
+    __tablename__ = "documents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id"), nullable=False, index=True)
+    doc_type: Mapped[DocType] = mapped_column(_enum(DocType, "doc_type"), nullable=False)
+    filename: Mapped[str] = mapped_column(String(255), nullable=False)
+    # Name on disk, generated by us. Never the client's filename, which is
+    # attacker-controlled and would allow writing outside the upload dir.
+    stored_name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    content_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    uploaded_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    uploaded_on: Mapped[date] = mapped_column(Date, nullable=False)
+
+    # --- Version control ---
+    # A corrected award copy must not silently become a second, equally
+    # authoritative row. Re-uploading the same doc_type on the same case
+    # supersedes the previous version instead: the old row stays on disk and
+    # in the trail, its is_current goes false, and version increments.
+    # Nothing is ever deleted, because a superseded land record is still
+    # evidence of what was on file at the time a decision was taken.
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    supersedes_id: Mapped[int | None] = mapped_column(
+        ForeignKey("documents.id"), nullable=True, index=True
+    )
+    is_current: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    # SHA-256 of the bytes as written. Tamper-evidence: a repository holding
+    # legal instruments has to be able to say whether a file changed under
+    # it, and a size in bytes cannot answer that question.
+    sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+    case: Mapped[Case] = relationship()
+
+
+class Objection(Base):
+    __tablename__ = "objections"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id"), nullable=False, index=True)
+    person_id: Mapped[int] = mapped_column(ForeignKey("people.id"), nullable=False, index=True)
+    grounds: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[ObjectionStatus] = mapped_column(
+        _enum(ObjectionStatus, "objection_status"), nullable=False
+    )
+    filed_on: Mapped[date] = mapped_column(Date, nullable=False)
+    response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    responded_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+    case: Mapped[Case] = relationship()
+    person: Mapped[Person] = relationship()
+
+
+class Alert(Base):
+    """Written by the AI Layer's rule runner, read by the dashboard.
+
+    Carries case ids and counts only — never a name or phone number. Alerts
+    surface on dashboards visible to roles that may not be entitled to
+    person-level detail.
+    """
+
+    __tablename__ = "alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id"), nullable=False, index=True)
+    rule: Mapped[str] = mapped_column(String(60), nullable=False, index=True)
+    severity: Mapped[AlertSeverity] = mapped_column(
+        _enum(AlertSeverity, "alert_severity"), nullable=False
+    )
+    message: Mapped[str] = mapped_column(String(300), nullable=False)
+    detected_on: Mapped[date] = mapped_column(Date, nullable=False)
+    # Rule-specific extras: days_stalled, missing_document_types, and so
+    # on. Free-form because each rule has different things worth showing,
+    # but counts and ids only — never a name or phone number.
+    details: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    is_resolved: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    case: Mapped[Case] = relationship()
+
+
+class AuditLog(Base):
+    """Who did what, when. Written by app.services.audit on every mutating
+    route. The problem statement asks for this directly, so it is not
+    optional — and it is append-only: nothing in the API updates or deletes
+    a row here."""
+
+    __tablename__ = "audit_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True, index=True)
+    action: Mapped[str] = mapped_column(String(60), nullable=False)
+    entity_type: Mapped[str] = mapped_column(String(40), nullable=False, index=True)
+    entity_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    detail: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
+
+
+class InviteCode(Base):
+    """An invitation to register, issued by an administrator.
+
+    Accounts on this system are not self-serve: an officer account carries
+    real authority over other people's land, so registration is gated on a
+    code that an administrator issued for a specific role and district.
+
+    **The code is stored hashed, never in the clear, and never encrypted.**
+    Encryption is reversible, which means a database read would yield working
+    invitations. A one-way hash cannot: the server never needs to read a code
+    back, only to check that one presented matches. This is the same reason
+    passwords are hashed, and the same bcrypt context does the work.
+
+    A hash alone cannot be looked up, though, so the code is split. It is
+    issued as `BHM-<selector>-<secret>`:
+
+    - `selector` is a short random public half, stored in the clear and
+      indexed. It identifies WHICH invitation is being presented.
+    - `secret` is the long random private half, stored only as a bcrypt hash.
+      It proves the presenter actually holds the invitation.
+
+    That is the selector/verifier pattern used for password-reset tokens, and
+    it buys two things: one indexed lookup instead of bcrypt-comparing every
+    row, and a constant-time verification that cannot be turned into a timing
+    oracle by an attacker guessing codes.
+    """
+
+    __tablename__ = "invite_codes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+
+    # The public half. Unique and indexed so presenting a code is one lookup.
+    selector: Mapped[str] = mapped_column(String(16), nullable=False, unique=True, index=True)
+
+    # bcrypt hash of the private half. Never returned by any response model.
+    secret_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # The role and district are fixed by whoever issued the invitation, not
+    # chosen by whoever redeems it. A code cannot be used to grant a role its
+    # issuer did not intend.
+    role: Mapped[Role] = mapped_column(_enum(Role, "role"), nullable=False)
+    district_id: Mapped[int | None] = mapped_column(ForeignKey("districts.id"), nullable=True)
+    # The tier above a district, for a state officer's invitation. Same
+    # reasoning as district_id: the scope is fixed by whoever issued the
+    # code, never chosen by whoever redeems it.
+    state_id: Mapped[int | None] = mapped_column(ForeignKey("states.id"), nullable=True)
+    # Which requiring body a REQUIRING_BODY invitation files for. Set here
+    # rather than typed at signup, because it decides which proposals the
+    # account can see.
+    organisation: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    # A note for the issuer's own records: "SLAO, Tumakuru intake, Sept".
+    label: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    max_uses: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    used_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    expires_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    is_revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    district: Mapped["District | None"] = relationship()
+    state: Mapped["State | None"] = relationship()
+
+
+class StageSla(Base):
+    """How long each stage is expected to take.
+
+    Without this there is no milestone to miss, and "timeline adherence" --
+    which the problem statement names as a dashboard tile -- has no data
+    behind it. It also fixes a real flaw in the stalled-case rule, which
+    applied one flat ten-day threshold to all nine stages even though a
+    Social Impact Assessment legitimately runs for months while a
+    declaration should not.
+
+    `statutory_days` is the limit the Act itself sets, where it sets one.
+    `standard_days` is the administrative target, which is shorter, and it
+    is what the dashboard measures against -- an office that only ever meets
+    the statutory maximum is not performing well, it is performing legally.
+    """
+
+    __tablename__ = "stage_sla"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    stage: Mapped[Stage] = mapped_column(_enum(Stage, "stage"), nullable=False, unique=True)
+    standard_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    statutory_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # Fraction of standard_days at which a case starts reading "at risk"
+    # rather than "on time". Stored per stage because the useful warning
+    # distance differs: 80% of a 30-day stage is six days' notice, while
+    # 80% of a 180-day stage is over a month.
+    warn_at_fraction: Mapped[float] = mapped_column(Float, nullable=False, default=0.8)
+    basis: Mapped[str | None] = mapped_column(String(200), nullable=True)
+
+
+class StatutoryNotice(Base):
+    """A published instrument under the Act -- notification, declaration,
+    award or possession notice.
+
+    This is what "notifications issued" and "awards declared" actually
+    count. Before it existed both had to be inferred from a case's CURRENT
+    stage, which meant a case that moved past declaration stopped counting
+    as ever having been notified. A cumulative figure that goes DOWN as work
+    progresses is worse than no figure at all.
+
+    Rows are append-only and carry the gazette reference, so a number on the
+    dashboard can be traced to a specific published instrument rather than
+    to an inference about what stage a case happens to sit at today.
+    """
+
+    __tablename__ = "statutory_notices"
+    __table_args__ = (
+        UniqueConstraint("case_id", "notice_type", name="uq_statutory_notice_case_type"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id"), nullable=False, index=True)
+    notice_type: Mapped[NoticeType] = mapped_column(
+        _enum(NoticeType, "notice_type"), nullable=False, index=True
+    )
+    # "Section 11(1)" -- the provision the instrument is issued under.
+    section_reference: Mapped[str] = mapped_column(String(40), nullable=False)
+    gazette_number: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    issuing_authority: Mapped[str] = mapped_column(String(160), nullable=False)
+    issued_on: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    # The scanned instrument, once uploaded. Nullable because the notice is
+    # issued in the register before the scan reaches the system.
+    document_id: Mapped[int | None] = mapped_column(ForeignKey("documents.id"), nullable=True)
+    issued_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    # Award notices only: what was declared, so "awards declared" can be
+    # reported alongside the money it committed without re-summing the
+    # compensation table for a figure that is fixed at declaration.
+    beneficiary_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    total_amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    case: Mapped[Case] = relationship()
+
+
+class Proposal(Base):
+    """A requiring body's request to acquire land, before any case exists.
+
+    The problem statement opens with "from project proposal submission to
+    final possession", and everything else in this system began at
+    preliminary notification -- that is, after the part being described. A
+    proposal is the missing front half: submitted by the body that wants the
+    land, scrutinised by the state, sanctioned centrally, and only then
+    turned into a Case.
+
+    Which tier owns a proposal is implied by its status rather than stored
+    in a separate assignee column: SUBMITTED and UNDER_SCRUTINY sit with the
+    state, a scrutinised proposal sits with the ministry. One source of
+    truth beats a status and an owner that can disagree with each other.
+    """
+
+    __tablename__ = "proposals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    proposal_number: Mapped[str] = mapped_column(
+        String(40), nullable=False, unique=True, index=True
+    )
+    title: Mapped[str] = mapped_column(String(200), nullable=False)
+    purpose: Mapped[str] = mapped_column(Text, nullable=False)
+    requiring_body: Mapped[str] = mapped_column(String(120), nullable=False)
+
+    state_id: Mapped[int] = mapped_column(ForeignKey("states.id"), nullable=False, index=True)
+    district_id: Mapped[int] = mapped_column(
+        ForeignKey("districts.id"), nullable=False, index=True
+    )
+    village_id: Mapped[int] = mapped_column(ForeignKey("villages.id"), nullable=False, index=True)
+
+    # What the body expects to need. Estimates, explicitly -- the surveyed
+    # figures live on parcels once the case exists, and conflating a
+    # pre-survey estimate with a measured area is how a dashboard ends up
+    # reporting land that was never actually notified.
+    estimated_area_ha: Mapped[float] = mapped_column(Float, nullable=False)
+    estimated_families: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    estimated_cost: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    status: Mapped[ProposalStatus] = mapped_column(
+        _enum(ProposalStatus, "proposal_status"), nullable=False, index=True
+    )
+    submitted_by_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
+    )
+    submitted_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    decided_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    decided_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    decision_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    # Set when the proposal is sanctioned and becomes a live acquisition.
+    case_id: Mapped[int | None] = mapped_column(ForeignKey("cases.id"), nullable=True, index=True)
+    project_id: Mapped[int | None] = mapped_column(ForeignKey("projects.id"), nullable=True)
+
+    created_at: Mapped[date] = mapped_column(Date, nullable=False)
+    status_changed_on: Mapped[date] = mapped_column(Date, nullable=False)
+
+    state: Mapped["State"] = relationship()
+    district: Mapped[District] = relationship()
+    village: Mapped[Village] = relationship()
+
+
+class ProposalReview(Base):
+    """Append-only record of every hand-off in a proposal's approval chain.
+
+    Distinct from the audit log in the same way CaseStageHistory is: this is
+    the proposal's own file history, and it is the thing a requiring body is
+    entitled to read to see where their application is sitting and why.
+    """
+
+    __tablename__ = "proposal_reviews"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    proposal_id: Mapped[int] = mapped_column(
+        ForeignKey("proposals.id"), nullable=False, index=True
+    )
+    from_status: Mapped[ProposalStatus | None] = mapped_column(
+        _enum(ProposalStatus, "proposal_status"), nullable=True
+    )
+    to_status: Mapped[ProposalStatus] = mapped_column(
+        _enum(ProposalStatus, "proposal_status"), nullable=False
+    )
+    actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    actor_role: Mapped[Role | None] = mapped_column(_enum(Role, "role"), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_on: Mapped[date] = mapped_column(Date, nullable=False)
+
+
+class Notification(Base):
+    """One finding, delivered to one person.
+
+    An Alert row is a finding about a case; this is that finding put in
+    front of somebody. The two are separate because the fan-out is
+    one-to-many and the read state is per person: the same stalled case is
+    unread for the SLAO and already dealt with by the district officer.
+
+    Carries its own message text rather than joining back to the alert, so
+    that rebuilding the alerts table -- which happens on every rule run, by
+    design -- does not blank out everybody's inbox.
+    """
+
+    __tablename__ = "notifications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    case_id: Mapped[int | None] = mapped_column(ForeignKey("cases.id"), nullable=True, index=True)
+    # The rule that produced it, so a user can filter by kind.
+    rule: Mapped[str | None] = mapped_column(String(60), nullable=True, index=True)
+    severity: Mapped[AlertSeverity] = mapped_column(
+        _enum(AlertSeverity, "alert_severity"), nullable=False
+    )
+    title: Mapped[str] = mapped_column(String(160), nullable=False)
+    body: Mapped[str] = mapped_column(String(400), nullable=False)
+    is_read: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, index=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now(), index=True
+    )
+    # Same discipline as Alert: ids and counts, never a name or a phone
+    # number. A notification is the most-forwarded object in any system.
+    details: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+# At most one UNREAD notification per user per case per rule. This partial
+# unique index is what makes a nightly rule run idempotent: running it twice
+# must not hand everybody a second copy of yesterday's alert. Read
+# notifications are excluded so the same finding can legitimately be raised
+# again after somebody has dismissed it.
+Index(
+    "uq_notification_open_per_user_case_rule",
+    Notification.user_id,
+    Notification.case_id,
+    Notification.rule,
+    unique=True,
+    postgresql_where=Notification.is_read.is_(False),
+)
+
+
+class FundDeposit(Base):
+    """The requiring body's money landing before possession can proceed.
+
+    Sec. 23 passes the award; disbursement (Compensation.amount_paid) is a
+    separate act, and between them sits a step this system had nowhere to
+    record: the requiring body actually depositing the awarded sum. In
+    practice this is the single most common place an acquisition stalls,
+    invisibly, because nothing distinguishes "no money has moved" from
+    "the deposit landed and disbursement just hasn't caught up yet."
+
+    One case can receive more than one deposit -- an agency topping up a
+    part payment is normal -- so this is a ledger, not a single flag.
+    """
+
+    __tablename__ = "fund_deposits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id"), nullable=False, index=True)
+    amount: Mapped[int] = mapped_column(Integer, nullable=False)
+    deposited_on: Mapped[date] = mapped_column(Date, nullable=False)
+    # Treasury challan / UTR / whatever reference the requiring body's
+    # payment carries. Free text: every state's treasury system formats
+    # this differently, and this record's job is to say the money moved and
+    # point at the proof, not to validate a format that varies by state.
+    reference: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    recorded_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    case: Mapped["Case"] = relationship()
+
+
+class MutationRequest(Base):
+    """A push to the state land-record portal: tell the revenue record that
+    government now owns this parcel.
+
+    The read direction (comparing the acquisition file against the upstream
+    record) is `app.integrations` / LandRecordsProvider.fetch, used during
+    Sec. 12 verification. This is the opposite direction and a different
+    moment in the lifecycle -- it fires after possession, not before award --
+    so it is its own table rather than a reuse of the reconciliation path.
+
+    `response_payload` keeps whatever the adapter returned, unparsed, so a
+    real portal's specific acknowledgement fields are never lost to a schema
+    that only anticipated the mock's.
+    """
+
+    __tablename__ = "mutation_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    parcel_id: Mapped[int] = mapped_column(ForeignKey("parcels.id"), nullable=False, index=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id"), nullable=False, index=True)
+    ulpin: Mapped[str | None] = mapped_column(String(14), nullable=True)
+    adapter: Mapped[str] = mapped_column(String(40), nullable=False)
+    sent_on: Mapped[date] = mapped_column(Date, nullable=False)
+    external_ref: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    status: Mapped[MutationStatus] = mapped_column(
+        _enum(MutationStatus, "mutation_status"), nullable=False, default=MutationStatus.SENT
+    )
+    response_payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    requested_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    parcel: Mapped["Parcel"] = relationship()
+    case: Mapped["Case"] = relationship()

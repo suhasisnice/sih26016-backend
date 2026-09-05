@@ -1,0 +1,31 @@
+# Pinned to the versions this stack was actually built and verified
+# against. Unpinned, a deploy months from now resolves whatever is newest
+# and a breaking release becomes a deployment-day mystery — the one moment
+# there is no time to debug a dependency.
+#
+# bcrypt is held at 4.0.1 specifically: passlib 1.7.4 reads bcrypt.__about__
+# to detect the version, and bcrypt 4.1+ removed it, which makes passlib
+# fail on every hash with a confusing AttributeError.
+
+fastapi==0.141.1
+uvicorn[standard]==0.52.4
+
+sqlalchemy==2.0.52
+psycopg2-binary==2.9.12
+geoalchemy2==0.20.0
+shapely==2.1.2
+
+pydantic==2.13.5
+pydantic-settings==2.15.0
+python-dotenv==1.2.3
+python-multipart==0.0.32
+
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+pyjwt==2.13.0
+
+# Schema migrations. Every schema change from Phase 1 onward is a revision
+# in alembic/versions; nothing calls create_all() any more. The container
+# runs `alembic upgrade head` before uvicorn starts, so a deploy migrates
+# itself rather than depending on somebody remembering to.
+alembic==1.19.1
