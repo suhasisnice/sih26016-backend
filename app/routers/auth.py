@@ -12,7 +12,7 @@ from app.core.security import create_access_token, create_mfa_token, decode_acce
 from app.dependencies import get_current_user, get_db
 from app.models import BiometricCredential, User
 from app.schemas import LoginResponse, UserOut
-from app.schemas.auth import MfaRequiredResponse, MfaVerifyRequest
+from app.schemas.auth import MfaRequiredResponse, MfaVerifyRequest, SetPasswordRequest
 from app.schemas.invite import (
     InviteCheck,
     InviteCodePreview,
@@ -131,12 +131,28 @@ def verify_login_code(
     return LoginResponse(
         access_token=create_access_token(user.id, user.role.value),
         user=_user_out(user),
+        must_change_password=user.must_change_password,
     )
 
 
 @router.get("/me", response_model=UserOut)
 def me(user: User = Depends(get_current_user)):
     return _user_out(user)
+
+
+@router.post("/set-password", status_code=status.HTTP_204_NO_CONTENT)
+def set_password(
+    payload: SetPasswordRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Replace a BhoomiMitra-generated temporary password with one the
+    person actually chose. Clears must_change_password so this is a one-time
+    gate, not something the frontend has to keep checking for."""
+    user.password_hash = hash_password(payload.new_password)
+    user.must_change_password = False
+    audit.record(db, user, action="auth.set_password", entity_type="user", entity_id=user.id)
+    db.commit()
 
 
 @router.post("/invite/preview", response_model=InviteCodePreview)

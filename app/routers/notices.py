@@ -14,16 +14,39 @@ of them. Nothing here is scoped to a district, because the public record is
 not.
 """
 
-from datetime import date
+import re
+from datetime import date, datetime, timezone
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from app.core.enums import CompensationStatus, NoticeType, ObjectionStatus, ParcelStatus, Stage
+from app.core.enums import (
+    CompensationStatus,
+    NoticeType,
+    NotificationChannel,
+    ObjectionStatus,
+    ParcelStatus,
+    Role,
+    Stage,
+)
+from app.core.security import hash_password
 from app.dependencies import get_db
-from app.models import Case, Compensation, District, Objection, Parcel, Project, StatutoryNotice, Village
+from app.models import (
+    Case,
+    Compensation,
+    District,
+    NotificationSubscription,
+    Objection,
+    Parcel,
+    Person,
+    Project,
+    StatutoryNotice,
+    User,
+    Village,
+)
+from app.services import audit, credentials, landowner_notify, totp
 
 router = APIRouter(prefix="/notices", tags=["notices"])
 
@@ -63,11 +86,18 @@ class NoticeLookupResult(BaseModel):
 
     found: bool
     survey_number: str | None = None
+    ulpin: str | None = None
     case_number: str | None = None
     stage: Stage | None = None
     village_name: str | None = None
     district_name: str | None = None
     project_name: str | None = None
+    # The body the acquisition is for — Project.requiring_body. Naming who
+    # to approach with a question is as much "on the public record" as the
+    # rest of this response; it is the officer's own name and phone number
+    # this route still withholds, not the office.
+    requiring_authority: str | None = None
+    area_ha: float | None = None
     preliminary_notification_on: date | None = None
     declaration_on: date | None = None
     award_declared: bool = False
@@ -139,6 +169,24 @@ def list_notices(
     return NoticeList(items=items, total=len(items))
 
 
+def _find_parcel_and_case(
+    db: Session, survey_number: str | None, ulpin: str | None
+) -> tuple[Parcel, Case] | None:
+    """The one query every survey-number-or-ULPIN entry point in this router
+    runs first — the public lookup below, and /subscribe and /provision
+    further down. Every parcel in this schema already belongs to a case
+    (see Parcel's docstring), so "found" and "under acquisition" are the
+    same fact here: there is no registry of land that exists but isn't
+    part of some acquisition for this route to distinguish from "no such
+    parcel on file at all"."""
+    query = db.query(Parcel, Case).join(Case, Parcel.case_id == Case.id)
+    if ulpin:
+        query = query.filter(Parcel.ulpin == ulpin.strip().upper())
+    else:
+        query = query.filter(Parcel.survey_number == survey_number.strip())
+    return query.first()
+
+
 @router.get("/lookup", response_model=NoticeLookupResult)
 def lookup_notice(
     db: Session = Depends(get_db),
@@ -160,13 +208,7 @@ def lookup_notice(
             detail="Provide a survey_number or a ulpin to look up",
         )
 
-    query = db.query(Parcel, Case).join(Case, Parcel.case_id == Case.id)
-    if ulpin:
-        query = query.filter(Parcel.ulpin == ulpin.strip().upper())
-    else:
-        query = query.filter(Parcel.survey_number == survey_number.strip())
-
-    row = query.first()
+    row = _find_parcel_and_case(db, survey_number, ulpin)
     if row is None:
         return NoticeLookupResult(found=False)
     parcel, case = row
@@ -203,11 +245,14 @@ def lookup_notice(
     return NoticeLookupResult(
         found=True,
         survey_number=parcel.survey_number,
+        ulpin=parcel.ulpin,
         case_number=case.case_number,
         stage=case.stage,
         village_name=village.name if village else None,
         district_name=district.name if district else None,
         project_name=project.name if project else None,
+        requiring_authority=project.requiring_body if project else None,
+        area_ha=parcel.area_ha,
         preliminary_notification_on=(
             notices[NoticeType.PRELIMINARY_NOTIFICATION].issued_on
             if NoticeType.PRELIMINARY_NOTIFICATION in notices
@@ -224,6 +269,232 @@ def lookup_notice(
 
 
 # --------------------------------------------------------------------------
+# Subscribing to updates, and provisioning a landowner's account — both
+# still unauthenticated, and both still reached from the same survey
+# number / ULPIN a citizen already used to run the lookup above. Neither is
+# proof of identity by itself (a survey number is often visible on a
+# physical notice board), which is a real limitation of this prototype, not
+# an oversight — see the module docstring's cross-reference in
+# app.services.credentials for the account side of that trade-off.
+# --------------------------------------------------------------------------
+
+# Loose on purpose: this accepts whatever a person actually typed on a
+# phone (spaces, a leading 0, a +91) rather than forcing one exact shape,
+# and only rejects what could not possibly be dialled.
+_PHONE_RE = re.compile(r"^\+?[0-9\s-]{10,15}$")
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+
+
+class SubscribeRequest(BaseModel):
+    survey_number: str | None = Field(default=None, max_length=20)
+    ulpin: str | None = Field(default=None, max_length=14)
+    whatsapp_number: str | None = Field(default=None, max_length=20)
+    email: str | None = Field(default=None, max_length=255)
+    # No default: silently treating a missing box as "consented" is exactly
+    # the failure mode consent exists to prevent.
+    consent: bool
+
+
+class SubscribeResponse(BaseModel):
+    id: int
+    message: str
+    # "sent" | "failed" | None (None = that channel wasn't chosen) — lets
+    # the UI show WhatsApp ✓ / Email ✓ per channel rather than one bare
+    # success, and tell a real send failure apart from "wasn't asked for".
+    whatsapp_status: str | None = None
+    email_status: str | None = None
+
+
+@router.post("/subscribe", response_model=SubscribeResponse, status_code=status.HTTP_201_CREATED)
+def subscribe(payload: SubscribeRequest, db: Session = Depends(get_db)):
+    """"Get updates about this land" — save a subscription against the
+    parcel a citizen just looked up, and immediately send them today's
+    status on whichever channel(s) they chose, via notify_landowner.
+    Independent of any account: this works whether or not the person ever
+    provisions a login below."""
+    if not payload.survey_number and not payload.ulpin:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Provide a survey_number or a ulpin.")
+    if not payload.consent:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Consent is required before we can send you updates about this land.",
+        )
+    if not payload.whatsapp_number and not payload.email:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Choose at least one of WhatsApp or email to be notified on.",
+        )
+    if payload.whatsapp_number and not _PHONE_RE.match(payload.whatsapp_number.strip()):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "That doesn't look like a valid mobile number.")
+    if payload.email and not _EMAIL_RE.match(payload.email.strip()):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "That doesn't look like a valid email address.")
+
+    row = _find_parcel_and_case(db, payload.survey_number, payload.ulpin)
+    if row is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "Your land was not found in the available acquisition records.",
+        )
+    parcel, case = row
+
+    whatsapp_number = payload.whatsapp_number.strip() if payload.whatsapp_number else None
+    email = payload.email.strip().lower() if payload.email else None
+
+    duplicate_query = db.query(NotificationSubscription).filter(
+        NotificationSubscription.parcel_id == parcel.id
+    )
+    if whatsapp_number:
+        existing_whatsapp = duplicate_query.filter(
+            NotificationSubscription.whatsapp_number == whatsapp_number
+        ).first()
+        if existing_whatsapp:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "That number is already subscribed to updates for this land.",
+            )
+    if email:
+        existing_email = duplicate_query.filter(NotificationSubscription.email == email).first()
+        if existing_email:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "That email is already subscribed to updates for this land.",
+            )
+
+    subscription = NotificationSubscription(
+        parcel_id=parcel.id,
+        whatsapp_number=whatsapp_number,
+        email=email,
+        consent_given_at=datetime.now(timezone.utc),
+    )
+    db.add(subscription)
+    db.flush()
+
+    audit.record(
+        db,
+        None,
+        action="notice.subscribe",
+        entity_type="notification_subscription",
+        entity_id=subscription.id,
+        detail=f"parcel_id={parcel.id}",
+    )
+    db.commit()
+
+    # Sent immediately, on today's actual status — not a bare "you're
+    # subscribed" line — so the very first message this channel ever
+    # carries is already the real notification template, not a placeholder
+    # the person has to wait for a later event to see.
+    project = db.get(Project, case.project_id)
+    notification_type, status_label = landowner_notify.label_for_stage(case.stage.value)
+    logs = landowner_notify.notify_landowner(db, parcel, project, notification_type, status_label)
+    db.commit()
+
+    whatsapp_status = next((log.status.value for log in logs if log.channel == NotificationChannel.WHATSAPP), None)
+    email_status = next((log.status.value for log in logs if log.channel == NotificationChannel.EMAIL), None)
+
+    return SubscribeResponse(
+        id=subscription.id,
+        message="You're subscribed to updates on this land.",
+        whatsapp_status=whatsapp_status,
+        email_status=email_status,
+    )
+
+
+class ProvisionRequest(BaseModel):
+    survey_number: str | None = Field(default=None, max_length=20)
+    ulpin: str | None = Field(default=None, max_length=14)
+
+
+class ProvisionResponse(BaseModel):
+    username: str
+    # Shown exactly once, in this response, and never again — the database
+    # only ever stores its bcrypt hash. See app.services.credentials.
+    temporary_password: str
+    # The 6-digit code /auth/login/verify accepts for an account with no
+    # authenticator app enrolled yet (app.services.totp.FALLBACK_CODE).
+    # Returned here rather than hardcoded in the frontend, so the frontend
+    # never has to know or duplicate that constant.
+    login_code_hint: str
+    message: str
+
+
+@router.post("/provision", response_model=ProvisionResponse, status_code=status.HTTP_201_CREATED)
+def provision_landowner(payload: ProvisionRequest, db: Session = Depends(get_db)):
+    """Create a landowner login for whoever owns the parcel just looked up.
+
+    Auto-provisioned, not officer-approved: a survey number or ULPIN is
+    enough to reach this endpoint, which is a real trust boundary this
+    prototype accepts deliberately rather than papering over — anyone who
+    can read a physical notice board could reach this for someone else's
+    land. Production hardening (an OTP to a phone number already on file,
+    an officer approval queue) is exactly the kind of thing this
+    intentionally does not build — see the project's own written
+    limitations for why.
+    """
+    if not payload.survey_number and not payload.ulpin:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Provide a survey_number or a ulpin.")
+
+    row = _find_parcel_and_case(db, payload.survey_number, payload.ulpin)
+    if row is None:
+        raise HTTPException(
+            status.HTTP_404_NOT_FOUND,
+            "Your land was not found in the available acquisition records.",
+        )
+    parcel, case = row
+
+    owner = db.get(Person, parcel.owner_id)
+    if owner is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "No landowner is on record for this parcel yet. Contact your district office.",
+        )
+
+    existing = (
+        db.query(User)
+        .filter(User.person_id == owner.id, User.role == Role.LANDOWNER)
+        .first()
+    )
+    if existing is not None:
+        raise HTTPException(
+            status.HTTP_409_CONFLICT,
+            "Credentials have already been issued for this land record. "
+            "Contact your district office if you need them reset.",
+        )
+
+    username = credentials.generate_username(db)
+    temporary_password = credentials.generate_temporary_password()
+
+    user = User(
+        username=username,
+        full_name=owner.name,
+        password_hash=hash_password(temporary_password),
+        role=Role.LANDOWNER,
+        district_id=case.district_id,
+        person_id=owner.id,
+        is_active=True,
+        must_change_password=True,
+    )
+    db.add(user)
+    db.flush()
+
+    audit.record(
+        db,
+        None,
+        action="landowner.provision",
+        entity_type="user",
+        entity_id=user.id,
+        detail=f"parcel_id={parcel.id}",
+    )
+    db.commit()
+
+    return ProvisionResponse(
+        username=username,
+        temporary_password=temporary_password,
+        login_code_hint=totp.FALLBACK_CODE,
+        message="Your BhoomiMitra login has been created. Sign in and set a new password.",
+    )
+
+
+# --------------------------------------------------------------------------
 # The authenticated side: issuing an instrument, and the register per case.
 #
 # The public list above stays exactly as narrow as it was. These routes are
@@ -232,21 +503,16 @@ def lookup_notice(
 # case's current stage.
 # --------------------------------------------------------------------------
 
-from fastapi import Depends, HTTPException, status  # noqa: E402
-
-from app.core.enums import Role  # noqa: E402
 from app.dependencies import (  # noqa: E402
     get_current_user,
     require_role,
     scope_cases_to_user,
 )
-from app.models import User  # noqa: E402
 from app.schemas.notice import (  # noqa: E402
     StatutoryNoticeCreate,
     StatutoryNoticeList,
     StatutoryNoticeOut,
 )
-from app.services import audit  # noqa: E402
 
 # Issuing a statutory instrument is an act with legal weight, so it is
 # narrower than the general case-writer list: a field officer records
@@ -381,6 +647,19 @@ def issue_notice(
     )
     db.commit()
     db.refresh(notice)
+
+    # Tell everyone already subscribed on this case's parcels — best-effort
+    # per parcel (notify_landowner never raises), so a subscriber's bad
+    # number cannot turn a legitimate notice-issuing request into a 500 for
+    # the officer who just published it.
+    notification_type, status_label = landowner_notify.label_for_notice_type(payload.notice_type.value)
+    project = db.get(Project, case.project_id)
+    parcels = db.query(Parcel).filter(Parcel.case_id == payload.case_id).all()
+    for parcel in parcels:
+        landowner_notify.notify_landowner(
+            db, parcel, project, notification_type, status_label, notified_on=notice.issued_on
+        )
+    db.commit()
 
     return StatutoryNoticeOut(**{
         **{c.name: getattr(notice, c.name) for c in notice.__table__.columns},

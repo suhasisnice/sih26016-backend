@@ -164,6 +164,18 @@ class NotificationChannel(str, Enum):
     IN_APP = "in_app"
     EMAIL = "email"
     SMS = "sms"
+    WHATSAPP = "whatsapp"
+
+
+class NotificationLogStatus(str, Enum):
+    """One row in notification_logs per channel per send attempt — see
+    app.services.landowner_notify. Deliberately just these three: a mock
+    provider is still either SENT or FAILED, never a fourth state — whether
+    it was mock is a separate `is_mock` flag on the row, not a status value,
+    so nothing has to change here the day a real provider replaces it."""
+    PENDING = "pending"
+    SENT = "sent"
+    FAILED = "failed"
 
 
 class RiskBand(str, Enum):
