@@ -30,6 +30,11 @@ class RegisterRequest(BaseModel):
     # cases through a statutory process, and the accounts are reachable from
     # whatever network the office is on.
     password: str = Field(min_length=12, max_length=128)
+    # Required for every role except landowner — the router checks this
+    # against invite.role, since the role isn't known until the invitation
+    # is verified. A landowner account never gets one, the same line
+    # Login.jsx and Signup.jsx draw for the same reason.
+    face_image_base64: str | None = None
 
 
 class RegisterResponse(BaseModel):
