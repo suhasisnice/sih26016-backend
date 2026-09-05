@@ -11,7 +11,7 @@ from app.database import Base, SessionLocal, engine
 from app.routers import (
     admin, auth, biometrics, cases, dashboard, documents, exports,
     integrations, meta, notices, notifications, objections, parcels,
-    persons, proposals, reference,
+    persons, proposals, public_records, reference,
 )
 
 
@@ -35,6 +35,10 @@ async def lifespan(_: FastAPI):
         from app.demo_seed import seed_demo
         seed_demo()
 
+    if settings.real_seed_enabled:
+        from app.real_seed import seed_real
+        seed_real()
+
     sweep = scheduler.start(app)
     try:
         yield
@@ -54,6 +58,7 @@ app.add_middleware(
 
 app.include_router(meta.router)
 app.include_router(reference.router)
+app.include_router(public_records.router)
 app.include_router(notices.router)
 app.include_router(auth.router)
 app.include_router(biometrics.router)
