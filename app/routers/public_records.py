@@ -39,17 +39,33 @@ def public_acquisition_summary(
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ):
-    """Aggregate only values explicitly present in the public-source layer."""
-    rows = db.query(
+    """Summarize public data without double-counting project and parcel rows."""
+    project_rows = db.query(
         func.count(PublicAcquisitionRecord.id),
         func.coalesce(func.sum(PublicAcquisitionRecord.area_ha), 0),
         func.coalesce(func.sum(PublicAcquisitionRecord.area_acres), 0),
+    ).filter(
+        PublicAcquisitionRecord.is_verified_public.is_(True),
+        PublicAcquisitionRecord.record_type == "project",
+    ).one()
+    parcel_rows = db.query(
+        func.count(PublicAcquisitionRecord.id),
+        func.coalesce(func.sum(PublicAcquisitionRecord.area_ha), 0),
+        func.coalesce(func.sum(PublicAcquisitionRecord.area_acres), 0),
+    ).filter(
+        PublicAcquisitionRecord.is_verified_public.is_(True),
+        PublicAcquisitionRecord.record_type == "parcel",
+    ).one()
+    compensation_rows = db.query(
+        func.count(PublicAcquisitionRecord.id),
         func.coalesce(func.sum(PublicAcquisitionRecord.compensation_paid), 0),
-    ).filter(PublicAcquisitionRecord.is_verified_public.is_(True)).one()
+    ).filter(
+        PublicAcquisitionRecord.is_verified_public.is_(True),
+        PublicAcquisitionRecord.record_type == "compensation",
+    ).one()
     return {
-        "record_count": rows[0],
-        "area_ha_reported": float(rows[1]),
-        "area_acres_reported": float(rows[2]),
-        "compensation_paid_reported": int(rows[3]),
-        "note": "Aggregates include only amounts and areas explicitly present in curated public sources.",
+        "project_records": {"count": project_rows[0], "area_ha_reported": float(project_rows[1]), "area_acres_reported": float(project_rows[2])},
+        "parcel_records": {"count": parcel_rows[0], "area_ha_reported": float(parcel_rows[1]), "area_acres_reported": float(parcel_rows[2])},
+        "compensation_records": {"count": compensation_rows[0], "compensation_paid_reported": int(compensation_rows[1])},
+        "note": "Project and parcel extents are reported separately to avoid double-counting. Compensation totals include only explicitly reported public amounts.",
     }
