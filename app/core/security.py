@@ -33,6 +33,28 @@ def create_access_token(user_id: int, role: str) -> str:
     return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
 
 
+# Five minutes: long enough to type a 6-digit code, short enough that a
+# token intercepted between the password step and the code step is
+# useless well before anyone would think to try it.
+MFA_TOKEN_EXPIRE_MINUTES = 5
+
+
+def create_mfa_token(user_id: int) -> str:
+    """A token proving "the password step just passed for this user",
+    nothing more. `typ: "mfa"` is what keeps it from working as a bearer
+    token — get_current_user rejects any token carrying it, so this can
+    only ever be redeemed at POST /auth/login/verify, never used to reach
+    an authenticated route directly."""
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user_id),
+        "typ": "mfa",
+        "iat": now,
+        "exp": now + timedelta(minutes=MFA_TOKEN_EXPIRE_MINUTES),
+    }
+    return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
+
+
 def decode_access_token(token: str) -> dict | None:
     """Returns the payload, or None if the token is invalid or expired.
 

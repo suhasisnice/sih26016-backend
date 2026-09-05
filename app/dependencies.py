@@ -43,7 +43,12 @@ def get_current_user(
     )
 
     payload = decode_access_token(token)
-    if payload is None or "sub" not in payload:
+    # typ == "mfa" marks a token from create_mfa_token — proof the password
+    # step passed, not proof of a completed sign-in. Without this check it
+    # would decode and verify exactly like a real access token, since it is
+    # signed with the same key, and would grant full access to whatever
+    # role db.get(User, ...) finds for its sub.
+    if payload is None or "sub" not in payload or payload.get("typ") == "mfa":
         raise credentials_error
 
     user = db.get(User, int(payload["sub"]))
