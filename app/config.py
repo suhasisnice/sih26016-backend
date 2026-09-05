@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     # creates fictional workflow records, not government records.
     demo_seed_enabled: bool = False
 
+    # Development/SIH convenience only. Loads curated public-source records
+    # into the read-only public_acquisition_records table. It never invents
+    # missing compensation, geometry, ULPIN or contact data.
+    real_seed_enabled: bool = False
+
     model_config = SettingsConfigDict(env_file=".env", case_sensitive=False)
 
     @property
@@ -55,6 +60,8 @@ class Settings(BaseSettings):
             )
         if self.demo_seed_enabled:
             problems.append("DEMO_SEED_ENABLED must be false in production.")
+        if self.real_seed_enabled:
+            problems.append("REAL_SEED_ENABLED must be false in production.")
 
         if problems:
             raise RuntimeError(
