@@ -57,6 +57,11 @@ services:
       - ./alembic.ini:/app/alembic.ini
       - ./tests:/app/tests
       - ./uploads:/app/uploads
+      # app.real_seed resolves REPO_ROOT as two parents up from itself and
+      # reads data/real_acquisition_seed from there — outside the container
+      # that's the monorepo root; inside it, nothing above /app exists
+      # unless this is mounted at the same /data the resolved path expects.
+      - ../data:/data:ro
     depends_on:
       db:
         condition: service_healthy

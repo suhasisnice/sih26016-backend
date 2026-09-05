@@ -1,6 +1,6 @@
 """Database model for curated public-source acquisition records."""
 
-from sqlalchemy import Boolean, Float, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, Float, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -37,8 +37,11 @@ class PublicAcquisitionRecord(Base):
     area_acres: Mapped[float | None] = mapped_column(Float, nullable=True)
     owner_name_public: Mapped[str | None] = mapped_column(Text, nullable=True)
     owner_data_status: Mapped[str | None] = mapped_column(String(160), nullable=True)
-    compensation_awarded: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    compensation_paid: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # BigInteger, not Integer: a project-level figure like the Upper
+    # Krishna Project's reported ₹544 crore disbursed is 5,440,000,000 —
+    # already past a 32-bit column's ~2.1 billion ceiling on its own.
+    compensation_awarded: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    compensation_paid: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     payment_status: Mapped[str | None] = mapped_column(String(80), nullable=True)
     source: Mapped[str | None] = mapped_column(String(200), nullable=True)
     source_reference: Mapped[str | None] = mapped_column(Text, nullable=True)
