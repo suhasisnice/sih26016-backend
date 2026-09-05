@@ -1,11 +1,19 @@
-"""Read-only API for verified public-source acquisition records."""
+"""Read-only API for verified public-source acquisition records.
+
+Unauthenticated, on purpose: everything in this table is sourced from a
+government gazette or a published news report — see
+data/real_acquisition_seed/README.md's integrity rules — so there is
+nothing here an anonymous visitor couldn't already find themselves. The
+Case Studies page on the public site reads this before anyone signs in,
+the same way /notices does.
+"""
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.dependencies import get_current_user, get_db
-from app.models import PublicAcquisitionRecord, User
+from app.dependencies import get_db
+from app.models import PublicAcquisitionRecord
 from app.schemas.public_records import PublicAcquisitionRecordOut
 
 router = APIRouter(prefix="/public-acquisitions", tags=["public-acquisitions"])
@@ -14,7 +22,6 @@ router = APIRouter(prefix="/public-acquisitions", tags=["public-acquisitions"])
 @router.get("", response_model=list[PublicAcquisitionRecordOut])
 def list_public_acquisitions(
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
     district: str | None = None,
     record_type: str | None = None,
     project_id: str | None = None,
@@ -35,10 +42,7 @@ def list_public_acquisitions(
 
 
 @router.get("/summary")
-def public_acquisition_summary(
-    db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
-):
+def public_acquisition_summary(db: Session = Depends(get_db)):
     """Summarize public data without double-counting project and parcel rows."""
     project_rows = db.query(
         func.count(PublicAcquisitionRecord.id),
