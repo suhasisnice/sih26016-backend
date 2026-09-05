@@ -1,0 +1,84 @@
+# Render blueprint for the API. The frontend is a separate repository with
+# its own render.yaml — Render reads a blueprint from the repo it is
+# deploying, and these two repos have no shared remote to put one in.
+#
+# Blueprints deploy from a git remote, so both repos have to be pushed to
+# GitHub before this does anything. See DEPLOYMENT.md.
+
+services:
+  - type: web
+    name: sih26016-api
+    runtime: docker
+    plan: free
+    # Nearest free region to the users this is for. Create the Supabase
+    # project in the matching region: every request crosses this hop, and
+    # Singapore <-> Frankfurt adds a few hundred ms to each one.
+    region: singapore
+    dockerfilePath: ./Dockerfile
+
+    # /health runs a real SELECT 1. It answers 200 with
+    # {"database": "unreachable"} rather than failing when the database is
+    # down, which is deliberate: a Supabase blip should show up in the
+    # response body, not restart the API instance underneath it.
+    healthCheckPath: /health
+
+    envVars:
+      # Turns on the boot-time guards in app/config.py. Without this the
+      # API would start happily with the built-in dev SECRET_KEY.
+      - key: ENVIRONMENT
+        value: production
+
+      # Render generates a long random value on first deploy and keeps it.
+      # Rotating it invalidates every issued token — everyone signs in
+      # again, nothing else breaks.
+      - key: SECRET_KEY
+        generateValue: true
+
+      # Set in the dashboard, never in this file: it carries the database
+      # password. Use the Supabase *transaction pooler* string (port 6543)
+      # — app/database.py switches to NullPool when it sees that port,
+      # which is what pgbouncer requires.
+      - key: DATABASE_URL
+        sync: false
+
+      # The deployed frontend's origin. Comma-separated if more than one.
+      # Must not be "*" — the config guard refuses to boot on a wildcard,
+      # because credentialed requests cannot use one anyway.
+      #
+      # Pinned rather than `sync: false` now that the frontend blueprint
+      # pins its own service name, so this URL is known ahead of the
+      # service existing. Getting it wrong does not fail the deploy: the
+      # API keeps answering curl perfectly while every browser request
+      # fails CORS, which is a slow thing to diagnose and a fast thing to
+      # avoid.
+      # How often the alert rules re-run themselves. Without this the rules
+      # only ever fire when somebody calls POST /admin/run-rules, which makes
+      # "the system notices something is overdue" depend on a human
+      # remembering to ask it to notice. 60 minutes is far tighter than the
+      # daily cadence a revenue office actually works to, and the sweep is
+      # idempotent, so over-running costs nothing.
+      #
+      # A platform cron job calling `python -m app.services.scheduler` is the
+      # better shape where the plan includes one; this works on every tier.
+      - key: RULES_INTERVAL_MINUTES
+        value: "60"
+
+      - key: FRONTEND_ORIGIN
+        # Both origins during the rename: Render creates a new service
+        # rather than renaming the old one, so the two coexist until
+        # sih26016-frontend is deleted by hand. Dropping the old origin
+        # before that would break it with a CORS failure while it is still
+        # reachable and still looks fine to curl. Trim this to the one
+        # entry once the old service is gone.
+        value: https://bhoomimitra.onrender.com,https://sih26016-frontend.onrender.com
+
+    # Uploaded documents land in /app/uploads, which is ephemeral on the
+    # free plan — every deploy and every wake-from-sleep starts with an
+    # empty directory while the document rows still point at the files.
+    # A disk fixes it and is not free; DEPLOYMENT.md spells out the
+    # trade-off rather than leaving it to be discovered.
+    #
+    # disk:
+    #   name: uploads
+    #   mountPath: /app/uploads
+    #   sizeGB: 1

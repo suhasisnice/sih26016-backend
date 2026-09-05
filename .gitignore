@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Never commit: holds SECRET_KEY and the database password.
+.env
+
+# Uploaded documents are case records, not source. Keep the directory,
+# ignore everything people put in it.
+uploads/*
+!uploads/.gitkeep
