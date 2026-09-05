@@ -39,6 +39,8 @@ from app.core.enums import (
     DocType,
     MutationStatus,
     NoticeType,
+    NotificationChannel,
+    NotificationLogStatus,
     ObjectionStatus,
     ParcelStatus,
     ProposalStatus,
@@ -87,6 +89,12 @@ class User(Base):
     # into an app by entering one real code, and cleared either way. Never
     # checked at login — an unconfirmed secret protects nothing.
     totp_pending_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # True only for an account POST /notices/provision created: the person
+    # never chose this password, BhoomiMitra generated it, so the first
+    # thing they do with it is replace it. Never set any other way — an
+    # invite-registered officer picks their own password at signup and this
+    # stays false for them from the start.
+    must_change_password: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     district: Mapped["District | None"] = relationship()
@@ -625,6 +633,77 @@ class StatutoryNotice(Base):
     total_amount: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     case: Mapped[Case] = relationship()
+
+
+class NotificationSubscription(Base):
+    """A citizen's request to be told about one parcel's acquisition.
+
+    Not tied to a User: the whole point is that someone can subscribe
+    before they have — or ever get — an account, from the public,
+    unauthenticated /notices/lookup screen. Delivery itself is never done
+    from here; app.integrations.messaging owns that, and this row is only
+    ever read back to decide who to notify and where.
+    """
+
+    __tablename__ = "notification_subscriptions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    parcel_id: Mapped[int] = mapped_column(ForeignKey("parcels.id"), nullable=False, index=True)
+    # At least one of these two is always set — enforced in the route, not
+    # here, since "at least one of two nullable columns" has no clean
+    # column-level constraint and the validation message belongs with the
+    # request, not the schema.
+    whatsapp_number: Mapped[str | None] = mapped_column(String(15), nullable=True)
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # Required before a row is ever created — see the route. Stored as the
+    # moment consent was given, not a bare boolean, so there is a timestamp
+    # to point to if anyone ever asks when and whether it was given.
+    consent_given_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    parcel: Mapped["Parcel"] = relationship()
+
+
+class NotificationLog(Base):
+    """One send attempt, on one channel, to one recipient — the record
+    app.services.landowner_notify.notify_landowner writes every time it
+    tries WhatsApp or email against a subscription. A ledger, not a status
+    column on the subscription: one subscription lives through many
+    notification events (a preliminary notification, then a declaration,
+    then a status update), and each has to be answerable for on its own,
+    including a per-attempt PASS/FAIL when a real provider starts
+    occasionally failing for reasons that have nothing to do with the
+    subscription itself.
+    """
+
+    __tablename__ = "notification_logs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    parcel_id: Mapped[int] = mapped_column(ForeignKey("parcels.id"), nullable=False, index=True)
+    channel: Mapped[NotificationChannel] = mapped_column(
+        _enum(NotificationChannel, "notification_channel"), nullable=False
+    )
+    # "preliminary_notification" | "declaration" | "status_update" — see
+    # notify_landowner's own vocabulary, kept as plain text rather than an
+    # enum: unlike Stage or NoticeType this is this feature's own label, not
+    # part of the Act, so nothing outside this feature needs it fixed.
+    notification_type: Mapped[str] = mapped_column(String(40), nullable=False)
+    recipient: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[NotificationLogStatus] = mapped_column(
+        _enum(NotificationLogStatus, "notification_log_status"), nullable=False
+    )
+    # Whether the provider that handled this was live or the mock — read off
+    # the provider's own ProviderInfo.is_live at send time, not inferred
+    # later, since the answer would otherwise change retroactively for every
+    # old row the day a real provider is switched in.
+    is_mock: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    parcel: Mapped["Parcel"] = relationship()
 
 
 class Proposal(Base):

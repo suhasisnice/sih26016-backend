@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     access_token_expire_minutes: int = 12 * 60
     max_upload_bytes: int = 10 * 1024 * 1024
     land_records_provider: str = "mock"
+    # "mock" (default) logs instead of sending — see
+    # app.integrations.messaging for the WhatsApp/email provider seam.
+    notification_provider: str = "mock"
     rules_interval_minutes: int = 0
     login_rate_limit_attempts: int = 10
     login_rate_limit_window_seconds: int = 300

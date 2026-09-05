@@ -60,7 +60,11 @@ def _issue_login(db: Session, user: User, *, action: str) -> LoginResponse:
 
     audit.record(db, user, action=action, entity_type="user", entity_id=user.id)
     db.commit()
-    return LoginResponse(access_token=create_access_token(user.id, user.role.value), user=_user_out(user))
+    return LoginResponse(
+        access_token=create_access_token(user.id, user.role.value),
+        user=_user_out(user),
+        must_change_password=user.must_change_password,
+    )
 
 
 def _active_credential(db: Session, user_id: int, kind: BiometricKind) -> BiometricCredential | None:

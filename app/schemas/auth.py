@@ -32,6 +32,10 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserOut
+    # True only for a landowner account POST /notices/provision created —
+    # see User.must_change_password. The frontend routes to a forced
+    # "set a new password" step instead of the dashboard when this is true.
+    must_change_password: bool = False
 
 
 class MfaRequiredResponse(BaseModel):
@@ -49,3 +53,13 @@ class MfaRequiredResponse(BaseModel):
 class MfaVerifyRequest(BaseModel):
     mfa_token: str
     code: str = Field(min_length=1, max_length=32)
+
+
+class SetPasswordRequest(BaseModel):
+    """POST /auth/set-password — always the signed-in user's own account,
+    never a target user id, so there is nothing here for one account to use
+    against another. No current-password field: reaching this endpoint
+    already required a valid access token, which is the same authentication
+    a current-password re-check would add."""
+
+    new_password: str = Field(min_length=12, max_length=128)
