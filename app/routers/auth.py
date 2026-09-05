@@ -8,17 +8,18 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from app.core.enums import BiometricKind, Role
-from app.core.security import create_access_token, hash_password, verify_password
+from app.core.security import create_access_token, create_mfa_token, decode_access_token, hash_password, verify_password
 from app.dependencies import get_current_user, get_db
 from app.models import BiometricCredential, User
 from app.schemas import LoginResponse, UserOut
+from app.schemas.auth import MfaRequiredResponse, MfaVerifyRequest
 from app.schemas.invite import (
     InviteCheck,
     InviteCodePreview,
     RegisterRequest,
     RegisterResponse,
 )
-from app.services import audit, face, invites, ratelimit
+from app.services import audit, face, invites, ratelimit, totp
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
@@ -38,7 +39,7 @@ def _user_out(user: User) -> UserOut:
     )
 
 
-@router.post("/login", response_model=LoginResponse)
+@router.post("/login", response_model=MfaRequiredResponse)
 def login(
     request: Request,
     form: OAuth2PasswordRequestForm = Depends(),
@@ -71,6 +72,57 @@ def login(
         # should not get unlimited attempts against the rest.
         ratelimit.record_failure(request)
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account is disabled")
+
+    # The password guess surface is resolved here — clearing it now, not
+    # after the code step, matches how this limiter already treats face
+    # and fingerprint as separate surfaces from the password itself.
+    ratelimit.clear(request)
+
+    # No access token yet. Every password login now needs the code step at
+    # POST /auth/login/verify — this only proves the password was right.
+    return MfaRequiredResponse(
+        mfa_token=create_mfa_token(user.id),
+        totp_enabled=user.totp_secret is not None,
+    )
+
+
+@router.post("/login/verify", response_model=LoginResponse)
+def verify_login_code(
+    payload: MfaVerifyRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """The second step: redeem an mfa_token plus the code it asked for.
+
+    Same limiter as the password step and as face/fingerprint login — a
+    guess at this 6-digit code (or, for an unenrolled account, at the
+    fixed fallback in app.services.totp) is exactly as attackable and
+    costs the same to defend.
+    """
+    wait = ratelimit.retry_after_seconds(request)
+    if wait is not None:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many failed attempts. Try again shortly.",
+            headers={"Retry-After": str(wait)},
+        )
+
+    invalid_session = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="That verification session has expired. Sign in again.",
+    )
+
+    token_payload = decode_access_token(payload.mfa_token)
+    if token_payload is None or token_payload.get("typ") != "mfa":
+        raise invalid_session
+
+    user = db.get(User, int(token_payload["sub"]))
+    if user is None or not user.is_active:
+        raise invalid_session
+
+    if not totp.verify_login_code(user.totp_secret, payload.code):
+        ratelimit.record_failure(request)
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="That code wasn't right.")
 
     ratelimit.clear(request)
     audit.record(db, user, action="auth.login", entity_type="user", entity_id=user.id)

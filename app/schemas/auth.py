@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.enums import Role
 
@@ -32,3 +32,20 @@ class LoginResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
     user: UserOut
+
+
+class MfaRequiredResponse(BaseModel):
+    """What POST /auth/login returns now instead of a token — every
+    password login needs the second step at POST /auth/login/verify
+    before it issues one. totp_enabled tells the frontend which prompt to
+    show: a real rotating code, or app.services.totp's fixed fallback for
+    an account that hasn't enrolled an authenticator yet."""
+
+    mfa_required: bool = True
+    mfa_token: str
+    totp_enabled: bool
+
+
+class MfaVerifyRequest(BaseModel):
+    mfa_token: str
+    code: str = Field(min_length=1, max_length=32)
