@@ -11,6 +11,7 @@ from app.database import Base, SessionLocal, engine
 from app.routers import (
     admin,
     auth,
+    biometrics,
     cases,
     dashboard,
     documents,
@@ -107,6 +108,7 @@ app.include_router(reference.router)
 # not been published in any sense the Act would recognise.
 app.include_router(notices.router)
 app.include_router(auth.router)
+app.include_router(biometrics.router)
 app.include_router(cases.router)
 # The proposal pipeline: submission, scrutiny, sanction. Registered before
 # parcels only for readability — the lifecycle reads in order.

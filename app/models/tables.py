@@ -33,6 +33,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.enums import (
     AlertSeverity,
+    BiometricKind,
     CaseStatus,
     CompensationStatus,
     DocType,
@@ -802,3 +803,126 @@ class MutationRequest(Base):
 
     parcel: Mapped["Parcel"] = relationship()
     case: Mapped["Case"] = relationship()
+
+
+class BiometricCredential(Base):
+    """One enrolled biometric factor for one user.
+
+    A ledger, not a flag on `users` — the same reason FundDeposit is its
+    own table above: an account can re-enroll (a new phone's camera, a
+    finger cut and healed), and the old row is history rather than
+    something a re-enrollment has to destructively overwrite. Only one row
+    per (user, kind) is ever active at a time; the partial unique index
+    below enforces that at the database rather than trusting every caller
+    to check first.
+
+    `template` holds two different shapes depending on `kind`, and neither
+    is human-legible:
+    - FACE: a JSON-encoded 128-float face_recognition embedding. Never the
+      photo itself — the image is discarded the moment the embedding is
+      computed, both at enrollment and at every login attempt, so a
+      database read yields a vector matching algorithms need and nothing
+      a person could look at.
+    - FINGERPRINT: a base64 ANSI-378/ISO-19794-2 template as the Mantra
+      MFS100 SDK's non-Aadhaar capture mode returns it. This is already
+      what the device's own certified matcher (MFS100MatchISO) expects, so
+      the kiosk agent that enrolled it is also the only thing that ever
+      needs to read it back — see app.services.kiosk_auth.
+    """
+
+    __tablename__ = "biometric_credentials"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    kind: Mapped[BiometricKind] = mapped_column(
+        _enum(BiometricKind, "biometric_kind"), nullable=False
+    )
+    template: Mapped[str] = mapped_column(Text, nullable=False)
+    # e.g. "face_recognition_dlib_resnet_v1" or "mfs100_ansi378". Recorded so
+    # a future change of matching algorithm can tell which rows it can
+    # actually compare against and which need re-enrollment.
+    algorithm: Mapped[str] = mapped_column(String(60), nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    user: Mapped["User"] = relationship()
+
+
+# One active credential per (user, kind) — re-enrollment deactivates the old
+# row rather than deleting it, so this is a partial index rather than a
+# plain UniqueConstraint. Same technique as notifications' one-unread-row
+# guard above.
+Index(
+    "ix_biometric_credentials_active_per_kind",
+    BiometricCredential.user_id,
+    BiometricCredential.kind,
+    unique=True,
+    postgresql_where=BiometricCredential.is_active.is_(True),
+)
+
+
+class KioskAgent(Base):
+    """A registered fingerprint kiosk: one Mantra MFS100 scanner, one PC,
+    one small local agent process (see docs/ or the mantra-agent/ folder at
+    the repo root) that the officer login screen's fingerprint fallback
+    talks to.
+
+    Selector/verifier split, identical in shape to InviteCode above and for
+    the same reason: the agent's API key is the only thing standing between
+    "a kiosk that ran a real MFS100 capture and match" and "a script that
+    claims a match happened" (see FingerprintChallenge), so it is stored
+    hashed and the plaintext exists exactly once, in the response to
+    whoever registered the kiosk.
+    """
+
+    __tablename__ = "kiosk_agents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    selector: Mapped[str] = mapped_column(String(16), nullable=False, unique=True, index=True)
+    secret_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    # A human label for the admin screen — "DC Office Bengaluru, Counter 1"
+    # — not used for anything the backend decides.
+    label: Mapped[str] = mapped_column(String(120), nullable=False)
+    district_id: Mapped[int | None] = mapped_column(ForeignKey("districts.id"), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    district: Mapped["District | None"] = relationship()
+
+
+class FingerprintChallenge(Base):
+    """One outstanding fingerprint login attempt.
+
+    Minted when a kiosk agent fetches the claimed user's enrolled template
+    (POST /biometrics/fingerprint/challenge) and consumed by the matching
+    POST /biometrics/fingerprint/login within `expires_at`. This is what
+    stops a kiosk's API key alone from being enough to mint a session for
+    any username on request: the agent must also present a nonce this
+    server minted for that exact (kiosk, user) pair, tying "a template was
+    handed out" to "a login was granted" into one round trip a stolen key
+    cannot replay after the fact, and cannot use for a user it never
+    fetched a template for.
+    """
+
+    __tablename__ = "fingerprint_challenges"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kiosk_agent_id: Mapped[int] = mapped_column(
+        ForeignKey("kiosk_agents.id"), nullable=False, index=True
+    )
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    nonce: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    kiosk_agent: Mapped["KioskAgent"] = relationship()
+    user: Mapped["User"] = relationship()
