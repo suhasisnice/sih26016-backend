@@ -10,9 +10,9 @@ WORKDIR /app
 # afterwards keeps the deployed image smaller and its attack surface
 # narrower than the build environment that produced it.
 #
-# cmake, g++ and the BLAS/LAPACK headers are here for exactly one package:
-# dlib, which face_recognition sits on top of and which pip always
-# compiles from source on this base image (no prebuilt wheel for
+# cmake, g++/make and the BLAS/LAPACK headers are here for exactly one
+# package: dlib, which face_recognition sits on top of and which pip
+# always compiles from source on this base image (no prebuilt wheel for
 # python:3.12-slim's glibc/ABI combination). This is genuinely the slowest
 # part of the whole build — several minutes, not seconds — and there is no
 # way around that short of maintaining a custom base image with dlib
@@ -20,13 +20,19 @@ WORKDIR /app
 # skipping them means dlib falls back to its own much slower matrix code,
 # which shows up as face_recognition taking noticeably longer per call at
 # runtime, not just at build time — worth the extra apt packages.
+#
+# `make` specifically: CMake needs an actual build tool to hand its
+# generated Makefiles to, and unlike a full build-essential install,
+# neither gcc nor g++ pulls it in as a dependency on this base image —
+# confirmed by an actual failed build ("CMake was unable to find a build
+# program corresponding to Unix Makefiles") before this line existed.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq-dev gcc g++ cmake libopenblas-dev liblapack-dev \
+    libpq-dev gcc g++ make cmake libopenblas-dev liblapack-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
-    && apt-get purge -y --auto-remove gcc g++ cmake \
+    && apt-get purge -y --auto-remove gcc g++ make cmake \
     && rm -rf /var/lib/apt/lists/*
 
 COPY ./app ./app

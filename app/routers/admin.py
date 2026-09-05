@@ -11,7 +11,7 @@ from app.dependencies import (
     require_role,
 )
 from app.models import District, InviteCode, KioskAgent, State, User
-from app.schemas.biometrics import KioskAgentCreate, KioskAgentIssued, KioskAgentOut
+from app.schemas.biometrics import KioskAgentCreate, KioskAgentIssued, KioskAgentList, KioskAgentOut
 from app.schemas.common import Message
 from app.schemas.dashboard import RunRulesResult
 from app.schemas.invite import (
