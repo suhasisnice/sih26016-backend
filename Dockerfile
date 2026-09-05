@@ -9,13 +9,24 @@ WORKDIR /app
 # gcc and libpq-dev are only needed while pip builds wheels; dropping them
 # afterwards keeps the deployed image smaller and its attack surface
 # narrower than the build environment that produced it.
+#
+# cmake, g++ and the BLAS/LAPACK headers are here for exactly one package:
+# dlib, which face_recognition sits on top of and which pip always
+# compiles from source on this base image (no prebuilt wheel for
+# python:3.12-slim's glibc/ABI combination). This is genuinely the slowest
+# part of the whole build — several minutes, not seconds — and there is no
+# way around that short of maintaining a custom base image with dlib
+# pre-built. openblas/lapack are not strictly required to compile dlib, but
+# skipping them means dlib falls back to its own much slower matrix code,
+# which shows up as face_recognition taking noticeably longer per call at
+# runtime, not just at build time — worth the extra apt packages.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq-dev gcc \
+    libpq-dev gcc g++ cmake libopenblas-dev liblapack-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
-    && apt-get purge -y --auto-remove gcc \
+    && apt-get purge -y --auto-remove gcc g++ cmake \
     && rm -rf /var/lib/apt/lists/*
 
 COPY ./app ./app

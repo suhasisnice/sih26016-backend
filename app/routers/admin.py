@@ -10,7 +10,9 @@ from app.dependencies import (
     get_db,
     require_role,
 )
-from app.models import District, InviteCode, State, User
+from app.models import District, InviteCode, KioskAgent, State, User
+from app.schemas.biometrics import KioskAgentCreate, KioskAgentIssued, KioskAgentOut
+from app.schemas.common import Message
 from app.schemas.dashboard import RunRulesResult
 from app.schemas.invite import (
     InviteCodeCreate,
@@ -18,7 +20,7 @@ from app.schemas.invite import (
     InviteCodeList,
     InviteCodeOut,
 )
-from app.services import alerts, audit, invites, notify
+from app.services import alerts, audit, invites, kiosk_auth, notify
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -170,6 +172,80 @@ def revoke_invite_code(
     db.commit()
     db.refresh(invite)
     return _invite_out(db, invite)
+
+
+@router.post(
+    "/kiosks",
+    response_model=KioskAgentIssued,
+    status_code=status.HTTP_201_CREATED,
+)
+def create_kiosk(
+    payload: KioskAgentCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(Role.ADMIN)),
+):
+    """Register a new fingerprint kiosk.
+
+    **The response is the only time the key exists in readable form** —
+    same rule as invite codes, same reason: it is stored hashed and cannot
+    be recovered afterwards. Whoever is installing the kiosk agent needs to
+    paste this into its config in this one response; if it is lost,
+    deactivate the kiosk and register another.
+    """
+    if payload.district_id is not None and db.get(District, payload.district_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="District not found")
+
+    kiosk, key = kiosk_auth.issue(
+        db, label=payload.label, district_id=payload.district_id, created_by_user_id=user.id
+    )
+    audit.record(
+        db,
+        user,
+        action="admin.kiosk_registered",
+        entity_type="kiosk_agent",
+        entity_id=kiosk.id,
+        detail=f"selector={kiosk.selector} label={kiosk.label}",
+    )
+    db.commit()
+    db.refresh(kiosk)
+    return KioskAgentIssued(key=key, kiosk=KioskAgentOut.model_validate(kiosk))
+
+
+@router.get("/kiosks", response_model=KioskAgentList)
+def list_kiosks(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(Role.ADMIN)),
+):
+    rows = db.query(KioskAgent).order_by(KioskAgent.created_at.desc()).all()
+    return KioskAgentList(
+        items=[KioskAgentOut.model_validate(row) for row in rows], total=len(rows)
+    )
+
+
+@router.post("/kiosks/{kiosk_id}/revoke", response_model=Message)
+def revoke_kiosk(
+    kiosk_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(Role.ADMIN)),
+):
+    """Deactivate a kiosk. Its key stops authenticating immediately —
+    nothing already logged in through it is affected, this only stops new
+    fingerprint login attempts from that machine."""
+    kiosk = db.get(KioskAgent, kiosk_id)
+    if kiosk is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Kiosk not found")
+
+    kiosk.is_active = False
+    audit.record(
+        db,
+        user,
+        action="admin.kiosk_revoked",
+        entity_type="kiosk_agent",
+        entity_id=kiosk.id,
+        detail=f"selector={kiosk.selector}",
+    )
+    db.commit()
+    return Message(detail="Kiosk deactivated.")
 
 
 def _invite_out(db: Session, invite: InviteCode) -> InviteCodeOut:
