@@ -1,7 +1,5 @@
 """Administrative operations. Admin role only, every one of them audited."""
 
-from datetime import date
-
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
@@ -113,15 +111,6 @@ def create_invite_code(
             detail="A requiring-body invitation needs the organisation it files for",
         )
 
-    # An expiry in the past would mint a code that is dead on arrival —
-    # invites.redeem_reason rejects it on the very first attempt, which looks
-    # like a bug to whoever issued it rather than the input mistake it is.
-    if payload.expires_on is not None and payload.expires_on < date.today():
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="The expiry date is in the past — choose today or later, or leave it blank for a code that never expires",
-        )
-
     invite, code = invites.issue(
         db,
         role=payload.role,
@@ -130,7 +119,6 @@ def create_invite_code(
         organisation=payload.organisation,
         label=payload.label,
         max_uses=payload.max_uses,
-        expires_on=payload.expires_on,
         created_by_user_id=user.id,
     )
 
@@ -153,9 +141,20 @@ def list_invite_codes(
     db: Session = Depends(get_db),
     user: User = Depends(require_role(Role.ADMIN)),
 ):
-    """Every invitation and what has become of it. Metadata only — the codes
-    themselves are not recoverable."""
+    """Every invitation and what has become of it, including the full code
+    while it is still usable — see InviteCodeOut.code.
+
+    There is no background sweep for expiry; a code past `expires_at` still
+    has a `secret_plain` sitting in the database until something looks at
+    it. This is that something — wiping happens here, on the one screen
+    that reads the list, rather than never.
+    """
     rows = db.query(InviteCode).order_by(InviteCode.created_at.desc()).all()
+    # A list comprehension, not any(...) — any() short-circuits on the first
+    # True and would leave every row after the first dead one un-swept.
+    wiped = [invites.wipe_dead_secret(row) for row in rows]
+    if any(wiped):
+        db.commit()
     return InviteCodeList(items=[_invite_out(db, row) for row in rows], total=len(rows))
 
 
@@ -172,6 +171,7 @@ def revoke_invite_code(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Invitation not found")
 
     invite.is_revoked = True
+    invite.secret_plain = None
     audit.record(
         db,
         user,
@@ -263,6 +263,7 @@ def _invite_out(db: Session, invite: InviteCode) -> InviteCodeOut:
     return InviteCodeOut(
         id=invite.id,
         selector=invite.selector,
+        code=invites.format_code(invite.selector, invite.secret_plain) if invite.secret_plain else None,
         role=invite.role,
         district_id=invite.district_id,
         district_name=invite.district.name if invite.district else None,
@@ -272,7 +273,7 @@ def _invite_out(db: Session, invite: InviteCode) -> InviteCodeOut:
         label=invite.label,
         max_uses=invite.max_uses,
         used_count=invite.used_count,
-        expires_on=invite.expires_on,
+        expires_at=invite.expires_at,
         is_revoked=invite.is_revoked,
         created_at=invite.created_at,
     )

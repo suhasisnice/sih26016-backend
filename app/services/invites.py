@@ -1,20 +1,23 @@
 """Issuing and redeeming registration invitations.
 
-Everything secret about an invitation lives here. Two rules the rest of the
+Everything secret about an invitation lives here. Rules the rest of the
 codebase depends on:
 
-1. **A full code exists in memory exactly once**, at the moment it is issued,
-   and is returned to the issuer in that one response. It is never stored in
-   the clear, never logged, and there is no endpoint that can read it back.
-   An administrator who loses a code revokes it and issues another.
+1. **Redemption checks only `secret_hash`.** `secret_plain` (see
+   InviteCode's docstring) exists purely so an administrator can view a
+   code again before it expires — it is never read during `verify()`.
 
 2. **Redeeming is constant-time.** A wrong secret and a wrong selector take
    the same work, so the endpoint cannot be used to discover which half of a
    guess was right.
+
+3. **Every invitation expires `EXPIRY_HOURS` after it is issued, no
+   exceptions.** Not chosen per-invitation, because a forgotten long-lived
+   code is a standing way into the system nobody is watching.
 """
 
 import secrets
-from datetime import date
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
@@ -28,6 +31,10 @@ PREFIX = "BHM"
 
 SELECTOR_BYTES = 6  # 12 hex characters — public, only needs to be unique
 SECRET_BYTES = 24  # 48 hex characters — private, needs to be unguessable
+
+# Fixed for every invitation regardless of role or scope — see the module
+# docstring.
+EXPIRY_HOURS = 48
 
 # A bcrypt hash of a value nobody holds. Verified against when the selector
 # does not exist, so a bad selector costs the same time as a bad secret and
@@ -65,16 +72,19 @@ def issue(
     state_id: int | None = None,
     organisation: str | None = None,
     max_uses: int,
-    expires_on: date | None,
     created_by_user_id: int | None,
 ) -> tuple[InviteCode, str]:
-    """Mint an invitation. Returns the row and the one-time plaintext code."""
+    """Mint an invitation, good for EXPIRY_HOURS from now. Returns the row and
+    the plaintext code — the same value is also in `invite.secret_plain`,
+    readable again later via `format_code`, until `wipe_dead_secret` clears
+    it."""
     selector = secrets.token_hex(SELECTOR_BYTES).upper()
     secret = secrets.token_hex(SECRET_BYTES)
 
     invite = InviteCode(
         selector=selector,
         secret_hash=hash_password(secret),
+        secret_plain=secret,
         role=role,
         district_id=district_id,
         state_id=state_id,
@@ -82,14 +92,29 @@ def issue(
         label=label,
         max_uses=max_uses,
         used_count=0,
-        expires_on=expires_on,
+        expires_at=datetime.now(timezone.utc) + timedelta(hours=EXPIRY_HOURS),
         created_by_user_id=created_by_user_id,
     )
     db.add(invite)
     db.flush()
 
-    # Returned separately and deliberately not stored anywhere.
     return invite, format_code(selector, secret)
+
+
+def wipe_dead_secret(invite: InviteCode) -> bool:
+    """Clear the plaintext copy once it can never again be redeemed.
+
+    Mutates in place and leaves committing to the caller, so a route that
+    touches several invitations — the list endpoint — can wipe all of them
+    and commit once. Returns whether anything changed, so that caller knows
+    whether a commit is even worth doing.
+    """
+    if invite.secret_plain is None:
+        return False
+    if invite.is_revoked or invite.expires_at <= datetime.now(timezone.utc):
+        invite.secret_plain = None
+        return True
+    return False
 
 
 def redeem_reason(invite: InviteCode | None) -> str | None:
@@ -98,7 +123,7 @@ def redeem_reason(invite: InviteCode | None) -> str | None:
         return "That invitation code is not valid."
     if invite.is_revoked:
         return "That invitation has been withdrawn. Ask the issuing office for another."
-    if invite.expires_on is not None and invite.expires_on < date.today():
+    if invite.expires_at <= datetime.now(timezone.utc):
         return "That invitation has expired. Ask the issuing office for another."
     if invite.used_count >= invite.max_uses:
         return "That invitation has already been used."

@@ -463,24 +463,31 @@ class InviteCode(Base):
     real authority over other people's land, so registration is gated on a
     code that an administrator issued for a specific role and district.
 
-    **The code is stored hashed, never in the clear, and never encrypted.**
-    Encryption is reversible, which means a database read would yield working
-    invitations. A one-way hash cannot: the server never needs to read a code
-    back, only to check that one presented matches. This is the same reason
-    passwords are hashed, and the same bcrypt context does the work.
-
-    A hash alone cannot be looked up, though, so the code is split. It is
-    issued as `BHM-<selector>-<secret>`:
+    **Redemption checks `secret_hash`, a bcrypt hash, never `secret_plain`.**
+    The code is split and issued as `BHM-<selector>-<secret>`:
 
     - `selector` is a short random public half, stored in the clear and
       indexed. It identifies WHICH invitation is being presented.
-    - `secret` is the long random private half, stored only as a bcrypt hash.
-      It proves the presenter actually holds the invitation.
+    - `secret` is the long random private half. `secret_hash` proves the
+      presenter actually holds the invitation without the server ever
+      needing to read a real secret back — the same reason passwords are
+      hashed, and the same bcrypt context does the work.
 
     That is the selector/verifier pattern used for password-reset tokens, and
     it buys two things: one indexed lookup instead of bcrypt-comparing every
     row, and a constant-time verification that cannot be turned into a timing
     oracle by an attacker guessing codes.
+
+    **`secret_plain` is a deliberate exception to "never store it in the
+    clear".** An administrator asked to be able to view and copy a code
+    again after the moment it was issued, for as long as it is still usable
+    — so this column holds a second, plaintext copy of the same secret,
+    purely for that convenience. It is wiped (`wipe_dead_secret`) the moment
+    the invitation becomes revoked or its `expires_at` passes, so the window
+    in which a database read would recover a live code is exactly the
+    window in which the code already works anyway. `secret_hash` remains
+    the only thing redemption ever checks — `secret_plain` is read, never
+    verified against.
     """
 
     __tablename__ = "invite_codes"
@@ -490,8 +497,16 @@ class InviteCode(Base):
     # The public half. Unique and indexed so presenting a code is one lookup.
     selector: Mapped[str] = mapped_column(String(16), nullable=False, unique=True, index=True)
 
-    # bcrypt hash of the private half. Never returned by any response model.
+    # bcrypt hash of the private half. Redemption checks this, never
+    # secret_plain — see the class docstring.
     secret_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # A plaintext copy of the same secret, kept only so an administrator can
+    # view/copy the full code again before it expires. Wiped by
+    # wipe_dead_secret the moment the invitation is revoked or its
+    # expires_at passes. None means "no longer available", not "never had
+    # one" — every invitation gets a plaintext copy at issue time.
+    secret_plain: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     # The role and district are fixed by whoever issued the invitation, not
     # chosen by whoever redeems it. A code cannot be used to grant a role its
@@ -512,7 +527,11 @@ class InviteCode(Base):
 
     max_uses: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     used_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    expires_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # Fixed at issue time to created_at + invites.EXPIRY_HOURS, the same for
+    # every invitation regardless of role or scope — not a value the issuer
+    # chooses. A timestamp rather than a date because the window is hours,
+    # not whole days.
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     is_revoked: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)

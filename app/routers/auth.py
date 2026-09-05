@@ -102,7 +102,7 @@ def preview_invite(payload: InviteCheck, db: Session = Depends(get_db)):
         district_name=invite.district.name if invite.district else None,
         state_name=invite.state.name if invite.state else None,
         organisation=invite.organisation,
-        expires_on=invite.expires_on,
+        expires_at=invite.expires_at,
     )
 
 
