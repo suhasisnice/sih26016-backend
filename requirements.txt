@@ -31,19 +31,18 @@ pyjwt==2.13.0
 alembic==1.19.1
 
 # Face login. face_recognition wraps dlib's ResNet face-recognition model —
-# see the Dockerfile for why the image needs cmake/make/g++ to build it.
+# see the Dockerfile for why the image needs cmake/g++/make to build it.
 # Pulls in dlib>=19.7 and face-recognition-models as transitive deps,
 # compiled from source; there is no prebuilt wheel for this base image.
 #
-# VERIFIED on first build (2026-09-05): numpy/dlib ABI was fine. What
-# actually broke at runtime was face-recognition-models' own __init__.py —
-# unmaintained since 2020, it still does `from pkg_resources import
-# resource_filename`, and modern setuptools (81+) has dropped pkg_resources
-# entirely, so `import face_recognition` fails with "Please install
-# face_recognition_models..." even though it IS installed. Pinning
-# setuptools below to a version that still bundles pkg_resources is the
-# fix — bumping it back up reintroduces the crash.
-setuptools==75.6.0
+# setuptools: face-recognition-models (unmaintained since ~2018) still
+# imports pkg_resources. setuptools 81+ dropped it outright, so "just
+# install setuptools" isn't enough on its own — confirmed against the
+# actual failure ("No module named 'pkg_resources'") with the *latest*
+# setuptools installed, not a hypothetical. 80.10.2 is the newest release
+# that still carries it; anything 81.0.0+ reintroduces the exact same
+# crash on `import face_recognition`.
+setuptools==80.10.2
 face-recognition==1.3.0
 numpy==2.5.2
 Pillow==12.3.0
