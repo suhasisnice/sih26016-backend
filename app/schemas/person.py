@@ -19,6 +19,13 @@ class CompensationOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    market_value_amount: int
+    solatium_rate_pct: int
+    # Derived from market_value_amount and solatium_rate_pct, not stored —
+    # sent so the frontend can show the award's three components without
+    # recomputing Sec. 30(1) arithmetic itself.
+    solatium_amount: int
+    interest_amount: int
     amount_awarded: int
     amount_paid: int
     amount_pending: int
@@ -107,12 +114,19 @@ class CompensationUpdate(BaseModel):
     """Compensation is edited on its own, never alongside R&R.
 
     Every field is optional so a payment can be recorded without restating
-    the award. The route rejects a paid amount above the awarded amount:
+    the award. amount_awarded is not one of these fields: Sec. 26-30 derive
+    it from market_value_amount, solatium_rate_pct and interest_amount, so
+    the route recomputes it from whichever of those three this changes. The
+    route also rejects a paid amount above the (recomputed) awarded amount:
     that combination is not a state the Act allows, and letting it through
     would quietly corrupt the dashboard's awarded-vs-paid figure.
     """
 
-    amount_awarded: int | None = Field(default=None, ge=0)
+    market_value_amount: int | None = Field(default=None, ge=0)
+    # Fixed at 100 by Sec. 30(1); capped there rather than left open so a
+    # typo doesn't silently multiply an award.
+    solatium_rate_pct: int | None = Field(default=None, ge=0, le=100)
+    interest_amount: int | None = Field(default=None, ge=0)
     amount_paid: int | None = Field(default=None, ge=0)
     status: CompensationStatus | None = None
     awarded_on: date | None = None
