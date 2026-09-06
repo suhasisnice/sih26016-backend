@@ -8,7 +8,7 @@ from datetime import date
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.enums import AlertSeverity, RiskBand, Stage, TimelineStatus
+from app.core.enums import AlertSeverity, DocType, RiskBand, Stage, TimelineStatus
 
 
 class KpiScope(BaseModel):
@@ -198,6 +198,37 @@ class AttentionCaseOut(BaseModel):
 
 class AttentionList(BaseModel):
     items: list[AttentionCaseOut]
+    total: int
+
+
+class FieldWorkCaseOut(BaseModel):
+    """One row of the Field Officer's work queue — a case in one of the
+    three on-ground stages (social impact assessment, land verification,
+    objection period) that still has something a field visit would
+    resolve: no parcels captured yet, a parcel with a GPS point but no
+    surveyed boundary, or a document this stage requires but does not
+    have. A case in these stages with none of that outstanding does not
+    appear — the queue is what to go do, not every case currently open.
+    """
+
+    case_id: int
+    case_number: str
+    title: str
+    project_name: str
+    village_name: str
+    district_name: str
+    stage: Stage
+    stage_due_on: date | None
+    days_remaining: int | None
+    timeline_status: TimelineStatus
+    parcel_count: int
+    parcels_missing_boundary: int
+    missing_document_types: list[DocType]
+    affected_family_count: int
+
+
+class FieldWorkList(BaseModel):
+    items: list[FieldWorkCaseOut]
     total: int
 
 
