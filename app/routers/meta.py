@@ -19,6 +19,7 @@ from app.core.enums import (
     Role,
     RnRStatus,
     Stage,
+    SurveyTaskStatus,
     TimelineStatus,
 )
 from app.database import engine
@@ -64,4 +65,5 @@ def get_enums():
         "benefit_delivery_statuses": _values(BenefitDeliveryStatus),
         "data_sources": _values(DataSource),
         "provenance_statuses": _values(ProvenanceStatus),
+        "survey_task_statuses": _values(SurveyTaskStatus),
     }

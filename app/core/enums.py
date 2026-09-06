@@ -256,6 +256,20 @@ class ProvenanceStatus(str, Enum):
     SYNTHETIC = "synthetic"
 
 
+class SurveyTaskStatus(str, Enum):
+    """A field survey's lifecycle. ASSIGNED means a supervisor created it and
+    the officer hasn't opened it yet — a self-started task skips straight to
+    IN_PROGRESS, since the officer chose to start it right then. RETURNED is
+    distinct from IN_PROGRESS even though both are editable: it is what
+    makes "Returned Reports" a real, populated section on the officer's own
+    dashboard rather than a label nothing ever sets."""
+    ASSIGNED = "assigned"
+    IN_PROGRESS = "in_progress"
+    SUBMITTED = "submitted"
+    APPROVED = "approved"
+    RETURNED = "returned"
+
+
 class BiometricKind(str, Enum):
     """Which factor a stored biometric credential or a login attempt is.
 
