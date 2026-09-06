@@ -1,12 +1,19 @@
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import case as sql_case
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from app.core.enums import AlertSeverity, CaseStatus, Role, Stage
-from app.dependencies import get_current_user, get_db, require_role, scope_cases_to_user
+from app.dependencies import (
+    get_current_user,
+    get_db,
+    require_role,
+    require_stepup,
+    scope_cases_to_user,
+    verify_stepup,
+)
 from app.models import (
     AffectedFamily,
     AuditLog,
@@ -25,7 +32,9 @@ from app.models import (
 from app.schemas import (
     CaseCreate,
     CaseDetail,
+    CaseHoldRequest,
     CaseListItem,
+    CaseResumeRequest,
     CaseStageAdvance,
     CaseStageHistoryOut,
     CaseUpdate,
@@ -49,6 +58,14 @@ CASE_AUDIT_READERS = (
     Role.SLAO,
     Role.FIELD_OFFICER,
     Role.RNR_OFFICER,
+)
+
+# The moments every officer-role workspace calls out as a "final" or
+# "high-impact" decision — Declaration, Award, Possession, and the case's
+# last legal stage. Earlier stages are procedural steps a case passes
+# through on the way there and do not get the extra confirmation.
+STEPUP_REQUIRED_STAGES = frozenset(
+    {Stage.DECLARATION, Stage.AWARD, Stage.POSSESSION, workflow.TERMINAL_STAGE}
 )
 
 
@@ -377,13 +394,37 @@ def advance_stage(
     payload: CaseStageAdvance,
     db: Session = Depends(get_db),
     user: User = Depends(require_role(*CASE_WRITERS)),
+    x_stepup_token: str | None = Header(default=None),
 ):
     """Move a case to the next (or previous) legal stage.
 
     workflow.advance_case refuses anything the Act does not allow and
-    writes both the stage history and the audit entry.
+    writes both the stage history and the audit entry. Two extra checks
+    live here rather than in workflow.advance_case, because both depend on
+    *which* transition this is, not just that it is a legal one:
+
+    - Moving backward is "send back for review" in every officer
+      workspace's own language, and a send-back with no reason attached is
+      not accountable to anyone reading the case history later.
+    - Moving into a stage in STEPUP_REQUIRED_STAGES needs a fresh biometric
+      re-confirmation, checked via the same X-Stepup-Token every other
+      high-impact action checks — this can't be a plain FastAPI
+      Depends(require_stepup) because whether it's required at all depends
+      on payload.to_stage, which a dependency resolved before the body is
+      parsed cannot see.
     """
     case = _get_visible_case(db, user, case_id)
+
+    is_send_back = workflow.STAGE_ORDER.index(payload.to_stage) < workflow.STAGE_ORDER.index(case.stage)
+    if is_send_back and not (payload.note and payload.note.strip()):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "Sending a case back a stage requires a remark explaining why.",
+        )
+
+    if payload.to_stage in STEPUP_REQUIRED_STAGES:
+        verify_stepup(x_stepup_token, user)
+
     workflow.advance_case(db, case, payload.to_stage, user, note=payload.note)
 
     # Informational, not urgent — a stage moving forward is the case working
@@ -439,6 +480,56 @@ def update_case(
         detail=", ".join(
             f"{k}={v.value if hasattr(v, 'value') else v}" for k, v in changed.items()
         ),
+    )
+    db.commit()
+    return get_case(case.id, db=db, user=user)
+
+
+@router.post("/{case_id}/hold", response_model=CaseDetail)
+def hold_case(
+    case_id: int,
+    payload: CaseHoldRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(*CASE_WRITERS)),
+    _stepup: None = Depends(require_stepup),
+):
+    """Halt a case that cannot proceed as submitted.
+
+    Sets CaseStatus.STALLED with a mandatory reason — see
+    CaseHoldRequest's docstring for why this is a status change, not a
+    stage the Act does not have. Always requires step-up: putting a case on
+    hold is exactly the kind of high-impact call every officer workspace
+    wants a fresh identity check on.
+    """
+    case = _get_visible_case(db, user, case_id)
+    if case.status == CaseStatus.CLOSED:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "A closed case cannot be put on hold.")
+
+    case.status = CaseStatus.STALLED
+    audit.record(
+        db, user, action="case.hold", entity_type="case", entity_id=case.id, detail=payload.note
+    )
+    db.commit()
+    return get_case(case.id, db=db, user=user)
+
+
+@router.post("/{case_id}/resume", response_model=CaseDetail)
+def resume_case(
+    case_id: int,
+    payload: CaseResumeRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(*CASE_WRITERS)),
+):
+    """Reverse a hold — a case that was stalled for a reason that has now
+    been addressed goes back to active, not to whatever stage it happened
+    to be sitting at, which never changed."""
+    case = _get_visible_case(db, user, case_id)
+    if case.status != CaseStatus.STALLED:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Only a held case can be resumed.")
+
+    case.status = CaseStatus.ACTIVE
+    audit.record(
+        db, user, action="case.resume", entity_type="case", entity_id=case.id, detail=payload.note
     )
     db.commit()
     return get_case(case.id, db=db, user=user)

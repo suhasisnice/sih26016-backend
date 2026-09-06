@@ -1,8 +1,8 @@
 from datetime import date
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.enums import DocType
+from app.core.enums import DocType, DocumentVerificationStatus
 
 
 class DocumentOut(BaseModel):
@@ -28,6 +28,21 @@ class DocumentOut(BaseModel):
     # record without needing access to the server. It identifies the bytes;
     # it is not a secret and reveals nothing about the content.
     sha256: str | None = None
+
+    # --- review, separate from version state above ---
+    verification_status: DocumentVerificationStatus = DocumentVerificationStatus.PENDING
+    verification_note: str | None = None
+    verified_by_user_id: int | None = None
+    verified_on: date | None = None
+
+
+class DocumentVerifyRequest(BaseModel):
+    """POST /documents/{id}/verify. A note is required for anything other
+    than a plain VERIFIED — "rejected, no reason given" tells the uploader
+    nothing they can act on."""
+
+    status: DocumentVerificationStatus
+    note: str | None = Field(default=None, max_length=500)
 
 
 class DocumentList(BaseModel):

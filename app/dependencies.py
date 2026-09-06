@@ -1,4 +1,4 @@
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
@@ -58,6 +58,29 @@ def get_current_user(
     if user is None or not user.is_active:
         raise credentials_error
     return user
+
+
+def verify_stepup(token: str | None, user: User) -> None:
+    """The check behind require_stepup below, exposed separately for a
+    route where step-up is only sometimes required — POST /cases/{id}/advance
+    only needs it for a handful of stages, decided from the request body,
+    which a plain Depends() cannot see. Raises the same 401 either way."""
+    payload = decode_access_token(token or "")
+    if payload is None or payload.get("typ") != "stepup" or payload.get("sub") != str(user.id):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Officer identity verification is required for this action.",
+        )
+
+
+def require_stepup(
+    x_stepup_token: str | None = Header(default=None),
+    user: User = Depends(get_current_user),
+) -> None:
+    """Gate for an action that ALWAYS needs a fresh biometric
+    re-confirmation, not a login — see app.routers.biometrics' /face/stepup
+    and /fingerprint/stepup/* endpoints for how X-Stepup-Token is minted."""
+    verify_stepup(x_stepup_token, user)
 
 
 def require_role(*allowed: Role):

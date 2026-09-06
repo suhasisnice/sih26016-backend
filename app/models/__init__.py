@@ -31,9 +31,11 @@ from app.models.tables import (
     ProposalReview,
     RequiredDocument,
     RnRRecord,
+    RnrBenefit,
     StageSla,
     State,
     StatutoryNotice,
+    StepUpChallenge,
     User,
     Village,
 )
@@ -66,9 +68,11 @@ __all__ = [
     "PublicAcquisitionRecord",
     "RequiredDocument",
     "RnRRecord",
+    "RnrBenefit",
     "StageSla",
     "State",
     "StatutoryNotice",
+    "StepUpChallenge",
     "User",
     "Village",
 ]

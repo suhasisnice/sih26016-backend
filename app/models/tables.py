@@ -33,10 +33,13 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.enums import (
     AlertSeverity,
+    BenefitCategory,
+    BenefitDeliveryStatus,
     BiometricKind,
     CaseStatus,
     CompensationStatus,
     DocType,
+    DocumentVerificationStatus,
     MutationStatus,
     NoticeType,
     NotificationChannel,
@@ -325,6 +328,42 @@ class RnRRecord(Base):
     person: Mapped[Person] = relationship()
 
 
+class RnrBenefit(Base):
+    """One named benefit under a person's R&R record — housing, land,
+    employment, annuity, or a state-specific "other" — tracked to
+    delivery. RnRRecord.status stays the one overall status for the whole
+    entitlement; this is the itemised breakdown underneath it, since "R&R
+    completed" without saying which of several promised benefits actually
+    arrived is not a figure anyone could act on.
+    """
+
+    __tablename__ = "rnr_benefits"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    rnr_record_id: Mapped[int] = mapped_column(ForeignKey("rnr_records.id"), nullable=False, index=True)
+    category: Mapped[BenefitCategory] = mapped_column(_enum(BenefitCategory, "benefit_category"), nullable=False)
+    # Required for OTHER, optional elsewhere — "Annuity" already says what
+    # it is; a state-specific benefit needs its own label to mean anything.
+    description: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    responsible_department: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    approved_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    expected_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    delivery_status: Mapped[BenefitDeliveryStatus] = mapped_column(
+        _enum(BenefitDeliveryStatus, "benefit_delivery_status"),
+        nullable=False,
+        default=BenefitDeliveryStatus.PENDING,
+    )
+    # The proof a benefit actually arrived — a photo, a handover
+    # certificate, a bank transfer receipt — reusing the existing document
+    # store rather than a second upload path for the same kind of evidence.
+    evidence_document_id: Mapped[int | None] = mapped_column(ForeignKey("documents.id"), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    updated_on: Mapped[date] = mapped_column(Date, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    rnr_record: Mapped["RnRRecord"] = relationship()
+
+
 class AffectedFamily(Base):
     """One affected household per row, linked to the case affecting it.
 
@@ -407,6 +446,21 @@ class Document(Base):
     # legal instruments has to be able to say whether a file changed under
     # it, and a size in bytes cannot answer that question.
     sha256: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
+
+    # --- Review, separate from version state above ---
+    # A document can be the current version and still be pending, verified,
+    # rejected or sent back for correction — version state answers "is this
+    # the operative copy", this answers "has anyone actually checked it".
+    # Re-uploading a corrected file (a new version) resets this to PENDING,
+    # since the previous review was of different bytes.
+    verification_status: Mapped[DocumentVerificationStatus] = mapped_column(
+        _enum(DocumentVerificationStatus, "document_verification_status"),
+        nullable=False,
+        default=DocumentVerificationStatus.PENDING,
+    )
+    verification_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    verified_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    verified_on: Mapped[date | None] = mapped_column(Date, nullable=True)
 
     case: Mapped[Case] = relationship()
 
@@ -1035,3 +1089,37 @@ class FingerprintChallenge(Base):
 
     kiosk_agent: Mapped["KioskAgent"] = relationship()
     user: Mapped["User"] = relationship()
+
+
+class StepUpChallenge(Base):
+    """One outstanding fingerprint step-up confirmation.
+
+    The same nonce/consume shape as FingerprintChallenge above, but for
+    re-confirming an already signed-in officer's identity before one
+    high-impact action, never for logging in — see
+    app.routers.biometrics' /fingerprint/stepup/start and /report, and
+    app.dependencies.verify_stepup for how the resulting token is checked.
+
+    Kept as its own table rather than reusing FingerprintChallenge: that
+    table's kiosk_agent_id is meaningfully NOT NULL there, because a login
+    attempt's kiosk fetches the challenge itself and so is known from the
+    start. Here the already-authenticated browser starts the challenge
+    before any kiosk is involved — it already knows who is asking — so
+    which kiosk eventually reports the match has to stay optional until it
+    does.
+    """
+
+    __tablename__ = "step_up_challenges"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    nonce: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
+    kiosk_agent_id: Mapped[int | None] = mapped_column(ForeignKey("kiosk_agents.id"), nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    user: Mapped["User"] = relationship()
+    kiosk_agent: Mapped["KioskAgent | None"] = relationship()

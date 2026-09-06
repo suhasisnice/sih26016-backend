@@ -55,6 +55,29 @@ def create_mfa_token(user_id: int) -> str:
     return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
 
 
+# Ten minutes: long enough to walk from a desk to the kiosk scanner and
+# back, short enough that a token minted for one approval cannot be sat on
+# and reused for an unrelated action minutes later.
+STEPUP_TOKEN_EXPIRE_MINUTES = 10
+
+
+def create_stepup_token(user_id: int) -> str:
+    """Proof that THIS user freshly re-confirmed their own identity by
+    face or fingerprint, for one high-impact action — never a login, and
+    never redeemable as one. `typ: "stepup"` keeps it out of
+    get_current_user the same way `typ: "mfa"` already is; a route that
+    requires step-up checks this token itself (see
+    app.dependencies.verify_stepup)."""
+    now = datetime.now(timezone.utc)
+    payload = {
+        "sub": str(user_id),
+        "typ": "stepup",
+        "iat": now,
+        "exp": now + timedelta(minutes=STEPUP_TOKEN_EXPIRE_MINUTES),
+    }
+    return jwt.encode(payload, settings.secret_key, algorithm=settings.algorithm)
+
+
 def decode_access_token(token: str) -> dict | None:
     """Returns the payload, or None if the token is invalid or expired.
 

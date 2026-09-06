@@ -14,26 +14,42 @@ from sqlalchemy.orm import Session
 
 from app.ai_layer import predict
 from app.ai_layer.kpis import compute_kpis, resolve_scope
-from app.core.enums import AlertSeverity, CaseStatus, Stage
+from app.core.enums import (
+    AlertSeverity,
+    CaseStatus,
+    CompensationStatus,
+    ObjectionStatus,
+    RnRStatus,
+    Stage,
+)
 from app.dependencies import entitled_case_ids, get_current_user, get_db
 from app.models import (
+    AffectedFamily,
     Alert,
     Case,
     CaseStageHistory,
     Compensation,
+    District,
+    Objection,
     Parcel,
+    Project,
+    RnRRecord,
     StatutoryNotice,
     User,
+    Village,
 )
 from app.schemas.dashboard import (
     AlertList,
     AlertOut,
+    AttentionCaseOut,
+    AttentionList,
     DashboardKpis,
     ForecastResponse,
     StageBreakdownItem,
     TrendPoint,
     TrendSeries,
 )
+from app.services import sla
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -155,6 +171,173 @@ def dashboard_alerts(
         for alert, case_number, district_id, stage in rows
     ]
     return AlertList(items=items, total=total, by_severity=by_severity, by_rule=by_rule)
+
+
+@router.get("/attention", response_model=AttentionList)
+def cases_requiring_attention(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """One row per case with at least one open finding, worst first — not
+    one row per finding the way /alerts is. Every factor the rules engine
+    already checks (stalled cases, unanswered objections, possession ahead
+    of R&R, unpaid awards, missing documents, deadline breaches, unused
+    land) is exactly the priority list a "cases requiring attention" panel
+    needs, so this reads the same Alert table POST /admin/run-rules
+    populates rather than re-deriving urgency from scratch.
+    """
+    entitled = entitled_case_ids(db, user)
+    if entitled is not None and not entitled:
+        return AttentionList(items=[], total=0)
+
+    open_alerts = db.query(Alert).filter(Alert.is_resolved.is_(False))
+    if entitled is not None:
+        open_alerts = open_alerts.filter(Alert.case_id.in_(entitled))
+
+    alert_counts = dict(
+        open_alerts.with_entities(Alert.case_id, func.count(Alert.id)).group_by(Alert.case_id).all()
+    )
+    case_ids = list(alert_counts.keys())
+    if not case_ids:
+        return AttentionList(items=[], total=0)
+
+    # The worst alert per case — cheaper to pull every open alert for these
+    # cases pre-sorted and keep the first one seen per case in Python than
+    # to express "first row per group" as a correlated subquery.
+    worst_by_case: dict[int, Alert] = {}
+    for alert in (
+        db.query(Alert)
+        .filter(Alert.case_id.in_(case_ids), Alert.is_resolved.is_(False))
+        .order_by(Alert.case_id, SEVERITY_RANK, Alert.id)
+        .all()
+    ):
+        worst_by_case.setdefault(alert.case_id, alert)
+
+    cases = (
+        db.query(Case, Project.name, Village.name, District.name)
+        .join(Project, Case.project_id == Project.id)
+        .join(Village, Case.village_id == Village.id)
+        .join(District, Case.district_id == District.id)
+        .filter(Case.id.in_(case_ids))
+        .all()
+    )
+
+    survey_numbers: dict[int, list[str]] = {}
+    for case_id, survey_number in (
+        db.query(Parcel.case_id, Parcel.survey_number).filter(Parcel.case_id.in_(case_ids)).all()
+    ):
+        survey_numbers.setdefault(case_id, []).append(survey_number)
+
+    # Whoever most recently moved each case — the closest honest stand-in
+    # for "responsible officer" this schema has, since Case carries no
+    # assignee column of its own.
+    last_mover: dict[int, int | None] = {}
+    for case_id, changed_by, _changed_on in (
+        db.query(
+            CaseStageHistory.case_id,
+            CaseStageHistory.changed_by_user_id,
+            CaseStageHistory.changed_on,
+        )
+        .filter(CaseStageHistory.case_id.in_(case_ids))
+        .order_by(
+            CaseStageHistory.case_id,
+            CaseStageHistory.changed_on.desc(),
+            CaseStageHistory.id.desc(),
+        )
+        .all()
+    ):
+        last_mover.setdefault(case_id, changed_by)
+    officer_ids = [v for v in last_mover.values() if v is not None]
+    officer_names = (
+        {u.id: u.full_name for u in db.query(User).filter(User.id.in_(officer_ids)).all()}
+        if officer_ids
+        else {}
+    )
+
+    family_counts = dict(
+        db.query(AffectedFamily.case_id, func.count(AffectedFamily.id))
+        .filter(AffectedFamily.case_id.in_(case_ids))
+        .group_by(AffectedFamily.case_id)
+        .all()
+    )
+    objection_counts = dict(
+        db.query(Objection.case_id, func.count(Objection.id))
+        .filter(
+            Objection.case_id.in_(case_ids),
+            Objection.status.in_([ObjectionStatus.FILED, ObjectionStatus.UNDER_REVIEW]),
+        )
+        .group_by(Objection.case_id)
+        .all()
+    )
+    compensation_pending = dict(
+        db.query(Compensation.case_id, func.count(Compensation.id))
+        .filter(
+            Compensation.case_id.in_(case_ids),
+            Compensation.status != CompensationStatus.PAID,
+        )
+        .group_by(Compensation.case_id)
+        .all()
+    )
+    rnr_pending = dict(
+        db.query(RnRRecord.case_id, func.count(RnRRecord.id))
+        .filter(
+            RnRRecord.case_id.in_(case_ids),
+            RnRRecord.status.in_([RnRStatus.PENDING, RnRStatus.IN_PROGRESS]),
+        )
+        .group_by(RnRRecord.case_id)
+        .all()
+    )
+
+    today = date.today()
+    sla_table = sla.load_sla(db)
+    severity_order = {
+        AlertSeverity.CRITICAL: 0,
+        AlertSeverity.HIGH: 1,
+        AlertSeverity.MEDIUM: 2,
+        AlertSeverity.LOW: 3,
+    }
+
+    items = []
+    for case, project_name, village_name, district_name in cases:
+        alert = worst_by_case.get(case.id)
+        days_remaining = sla.days_remaining(case.stage_due_on, today)
+        items.append(
+            AttentionCaseOut(
+                case_id=case.id,
+                case_number=case.case_number,
+                title=case.title,
+                project_name=project_name,
+                village_name=village_name,
+                district_name=district_name,
+                survey_numbers=survey_numbers.get(case.id, []),
+                stage=case.stage,
+                responsible_officer_name=officer_names.get(last_mover.get(case.id)),
+                stage_due_on=case.stage_due_on,
+                days_remaining=days_remaining,
+                timeline_status=sla.timeline_status(case.stage_due_on, case.stage, today, sla_table),
+                priority=alert.severity if alert else AlertSeverity.LOW,
+                reason=alert.message if alert else "",
+                open_alert_count=alert_counts.get(case.id, 0),
+                affected_family_count=family_counts.get(case.id, 0),
+                open_objection_count=objection_counts.get(case.id, 0),
+                compensation_pending_count=compensation_pending.get(case.id, 0),
+                rnr_pending_count=rnr_pending.get(case.id, 0),
+            )
+        )
+
+    # Worst severity first, then soonest deadline — the spec's own stated
+    # order (overdue and approaching-deadline outrank the count-based
+    # factors), with same-severity cases broken by urgency rather than an
+    # arbitrary id order.
+    items.sort(
+        key=lambda i: (
+            severity_order.get(i.priority, 9),
+            i.days_remaining if i.days_remaining is not None else 9999,
+        )
+    )
+
+    return AttentionList(items=items[:limit], total=len(items))
 
 
 @router.get("/cases-by-stage", response_model=list[StageBreakdownItem])

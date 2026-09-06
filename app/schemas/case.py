@@ -18,7 +18,22 @@ class CaseCreate(BaseModel):
 
 class CaseStageAdvance(BaseModel):
     to_stage: Stage
+    # Optional moving forward; the router requires it when to_stage is
+    # behind the case's current stage — see cases.py's advance_stage.
     note: str | None = Field(default=None, max_length=300)
+
+
+class CaseHoldRequest(BaseModel):
+    """The closest thing this system has to "reject": RFCTLARR cases don't
+    have a legal rejection, only a stage reached or not, so holding a case
+    sets CaseStatus.STALLED with a mandatory reason rather than inventing a
+    terminal state the Act does not recognise. See POST /cases/{id}/hold."""
+
+    note: str = Field(min_length=3, max_length=300)
+
+
+class CaseResumeRequest(BaseModel):
+    note: str = Field(min_length=3, max_length=300)
 
 
 class CaseStageHistoryOut(BaseModel):

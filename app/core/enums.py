@@ -198,6 +198,40 @@ class MutationStatus(str, Enum):
     FAILED = "failed"
 
 
+class BenefitCategory(str, Enum):
+    """A generic, configurable set of R&R benefit kinds — deliberately not
+    tied to any specific statutory formula (the Second Schedule's actual
+    entitlements vary by state policy and project type, which this
+    prototype does not encode). OTHER covers whatever a state's own R&R
+    policy adds that these four don't name."""
+    HOUSING = "housing"
+    LAND = "land"
+    EMPLOYMENT = "employment"
+    ANNUITY = "annuity"
+    OTHER = "other"
+
+
+class BenefitDeliveryStatus(str, Enum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    IN_PROCESS = "in_process"
+    DELIVERED = "delivered"
+    FAILED = "failed"
+    REVIEW_REQUIRED = "review_required"
+
+
+class DocumentVerificationStatus(str, Enum):
+    """Whether an officer has reviewed a document, distinct from its
+    version state (current/superseded — see the Document model). A
+    document's mere presence used to be the only signal; this adds the
+    review step every officer-role workspace's "Document Review" screen
+    asks for, without touching the versioning discipline already there."""
+    PENDING = "pending"
+    VERIFIED = "verified"
+    REJECTED = "rejected"
+    CORRECTION_REQUESTED = "correction_requested"
+
+
 class BiometricKind(str, Enum):
     """Which factor a stored biometric credential or a login attempt is.
 

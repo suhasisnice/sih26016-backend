@@ -12,7 +12,9 @@ from app.schemas.auth import LoginResponse, UserOut
 from app.schemas.case import (
     CaseCreate,
     CaseDetail,
+    CaseHoldRequest,
     CaseListItem,
+    CaseResumeRequest,
     CaseStageAdvance,
     CaseStageHistoryOut,
     CaseUpdate,
@@ -24,7 +26,9 @@ from app.schemas.geo import ParcelFeature, ParcelFeatureCollection, ParcelGeomet
 __all__ = [
     "CaseCreate",
     "CaseDetail",
+    "CaseHoldRequest",
     "CaseListItem",
+    "CaseResumeRequest",
     "CaseStageAdvance",
     "CaseStageHistoryOut",
     "CaseUpdate",
