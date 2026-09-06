@@ -22,8 +22,15 @@ class Settings(BaseSettings):
     # Twilio WhatsApp — used only when notification_provider="live".
     # twilio_whatsapp_from is Twilio's own number in "whatsapp:+1415..."
     # form (the sandbox number while testing), not the recipient's.
+    # twilio_account_sid is always required — it's what scopes either
+    # credential below to one account. Auth Token is Twilio's original,
+    # full-access master credential; an API Key (SID starting "SK" + its
+    # secret) is the scoped, revocable alternative Twilio itself now
+    # recommends, and takes priority in live.py when both are set.
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
+    twilio_api_key_sid: str = ""
+    twilio_api_key_secret: str = ""
     twilio_whatsapp_from: str = ""
 
     # SMTP email — used only when notification_provider="live".

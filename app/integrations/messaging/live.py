@@ -26,16 +26,33 @@ from app.integrations.messaging.base import MessagingUnavailable, ProviderInfo
 logger = logging.getLogger("bhoomimitra.messaging")
 
 
+def _twilio_client() -> Client:
+    """API Key (SID + secret) wins when both credential forms are set — see
+    config.py's docstring on why. Either way the client is still scoped to
+    twilio_account_sid; an API Key is not itself account-specific."""
+    if settings.twilio_api_key_sid and settings.twilio_api_key_secret:
+        return Client(
+            settings.twilio_api_key_sid,
+            settings.twilio_api_key_secret,
+            settings.twilio_account_sid,
+        )
+    return Client(settings.twilio_account_sid, settings.twilio_auth_token)
+
+
 class LiveMessagingProvider:
     info = ProviderInfo(key="live", label="Twilio WhatsApp + SMTP email (live)", is_live=True)
 
     def send_whatsapp(self, to: str, message: str) -> None:
-        if not (settings.twilio_account_sid and settings.twilio_auth_token and settings.twilio_whatsapp_from):
+        has_auth_token = settings.twilio_account_sid and settings.twilio_auth_token
+        has_api_key = (
+            settings.twilio_account_sid and settings.twilio_api_key_sid and settings.twilio_api_key_secret
+        )
+        if not ((has_auth_token or has_api_key) and settings.twilio_whatsapp_from):
             raise MessagingUnavailable(
-                "Twilio is not configured — set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN "
-                "and TWILIO_WHATSAPP_FROM."
+                "Twilio is not configured — set TWILIO_ACCOUNT_SID and TWILIO_WHATSAPP_FROM, "
+                "plus either TWILIO_AUTH_TOKEN or TWILIO_API_KEY_SID/TWILIO_API_KEY_SECRET."
             )
-        client = Client(settings.twilio_account_sid, settings.twilio_auth_token)
+        client = _twilio_client()
         to_whatsapp = to.strip() if to.strip().startswith("whatsapp:") else f"whatsapp:{to.strip()}"
         try:
             client.messages.create(
