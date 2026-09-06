@@ -1,9 +1,11 @@
 """Administrative operations. Admin role only, every one of them audited."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.core.enums import Role
+from app.core.security import hash_password
 from app.dependencies import (
     DISTRICT_SCOPED_ROLES,
     STATE_SCOPED_ROLES,
@@ -11,6 +13,7 @@ from app.dependencies import (
     require_role,
 )
 from app.models import District, InviteCode, KioskAgent, State, User
+from app.schemas.admin_user import AdminUserList, AdminUserOut, ResetPasswordResponse
 from app.schemas.biometrics import KioskAgentCreate, KioskAgentIssued, KioskAgentList, KioskAgentOut
 from app.schemas.common import Message
 from app.schemas.dashboard import RunRulesResult
@@ -20,7 +23,7 @@ from app.schemas.invite import (
     InviteCodeList,
     InviteCodeOut,
 )
-from app.services import alerts, audit, invites, kiosk_auth, notify
+from app.services import alerts, audit, credentials, invites, kiosk_auth, notify
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -257,6 +260,134 @@ def revoke_kiosk(
     )
     db.commit()
     return Message(detail="Kiosk deactivated.")
+
+
+@router.get("/users", response_model=AdminUserList)
+def list_users(
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(Role.ADMIN)),
+    role: Role | None = None,
+    district_id: int | None = None,
+    is_active: bool | None = None,
+    q: str | None = Query(default=None, max_length=120, description="Matches username or full name"),
+):
+    """Every account on the platform, seeded or invited. Creating one is a
+    separate flow (POST /admin/invite-codes, redeemed by the person
+    themself) — this is the directory of accounts that already exist, and
+    the three things an admin does to one: deactivate, reactivate, reset
+    its password.
+    """
+    query = db.query(User)
+    if role is not None:
+        query = query.filter(User.role == role)
+    if district_id is not None:
+        query = query.filter(User.district_id == district_id)
+    if is_active is not None:
+        query = query.filter(User.is_active == is_active)
+    if q:
+        like = f"%{q.strip()}%"
+        query = query.filter(or_(User.username.ilike(like), User.full_name.ilike(like)))
+
+    rows = query.order_by(User.role, User.full_name).all()
+    return AdminUserList(items=[_user_out(row) for row in rows], total=len(rows))
+
+
+@router.post("/users/{user_id}/deactivate", response_model=AdminUserOut)
+def deactivate_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(Role.ADMIN)),
+):
+    """Block an account from signing in, without touching anything it has
+    already done — every case, document and audit row it left behind stays
+    exactly as it is. Reversible with the endpoint below."""
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    if target.id == user.id:
+        # Not a security boundary (an admin could deactivate a second admin
+        # account instead) — just refusing the one click that locks the
+        # person doing it out of their own session with no one signed in
+        # to undo it.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="You cannot deactivate your own account"
+        )
+
+    target.is_active = False
+    audit.record(
+        db, user, action="admin.user_deactivated", entity_type="user", entity_id=target.id,
+        detail=f"username={target.username}",
+    )
+    db.commit()
+    db.refresh(target)
+    return _user_out(target)
+
+
+@router.post("/users/{user_id}/reactivate", response_model=AdminUserOut)
+def reactivate_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(Role.ADMIN)),
+):
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    target.is_active = True
+    audit.record(
+        db, user, action="admin.user_reactivated", entity_type="user", entity_id=target.id,
+        detail=f"username={target.username}",
+    )
+    db.commit()
+    db.refresh(target)
+    return _user_out(target)
+
+
+@router.post("/users/{user_id}/reset-password", response_model=ResetPasswordResponse)
+def reset_user_password(
+    user_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(Role.ADMIN)),
+):
+    """Issue a new temporary password for an account that has lost or
+    forgotten its own. Same generator app.services.credentials uses to
+    provision a landowner's first password, and the same one-time-reveal
+    rule as an invite code: this response is the only place it exists in
+    readable form, so it must be handed to the account holder now — there
+    is no way to come back and look at it again.
+    """
+    target = db.get(User, user_id)
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+
+    temporary_password = credentials.generate_temporary_password()
+    target.password_hash = hash_password(temporary_password)
+    target.must_change_password = True
+
+    audit.record(
+        db, user, action="admin.user_password_reset", entity_type="user", entity_id=target.id,
+        detail=f"username={target.username}",
+    )
+    db.commit()
+
+    return ResetPasswordResponse(username=target.username, temporary_password=temporary_password)
+
+
+def _user_out(row: User) -> AdminUserOut:
+    return AdminUserOut(
+        id=row.id,
+        username=row.username,
+        full_name=row.full_name,
+        role=row.role,
+        district_id=row.district_id,
+        district_name=row.district.name if row.district else None,
+        state_id=row.state_id,
+        state_name=row.state.name if row.state else None,
+        organisation=row.organisation,
+        is_active=row.is_active,
+        must_change_password=row.must_change_password,
+        created_at=row.created_at,
+    )
 
 
 def _invite_out(db: Session, invite: InviteCode) -> InviteCodeOut:
