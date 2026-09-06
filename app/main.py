@@ -11,7 +11,7 @@ from app.database import Base, SessionLocal, engine
 from app.routers import (
     admin, auth, biometrics, cases, dashboard, documents, exports,
     integrations, meta, mfa, notices, notifications, objections, parcels,
-    persons, projects, proposals, public_records, reference,
+    persons, projects, proposals, public_records, reference, survey,
 )
 
 
@@ -67,6 +67,7 @@ app.include_router(cases.router)
 app.include_router(projects.router)
 app.include_router(proposals.router)
 app.include_router(parcels.router)
+app.include_router(survey.router)
 app.include_router(persons.router)
 app.include_router(persons.compensation_router)
 app.include_router(persons.rnr_router)

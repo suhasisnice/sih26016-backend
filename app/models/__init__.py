@@ -36,6 +36,8 @@ from app.models.tables import (
     State,
     StatutoryNotice,
     StepUpChallenge,
+    SurveyPhoto,
+    SurveyTask,
     User,
     Village,
 )
@@ -73,6 +75,8 @@ __all__ = [
     "State",
     "StatutoryNotice",
     "StepUpChallenge",
+    "SurveyPhoto",
+    "SurveyTask",
     "User",
     "Village",
 ]

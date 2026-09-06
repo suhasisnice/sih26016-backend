@@ -52,6 +52,7 @@ from app.core.enums import (
     RnRStatus,
     Role,
     Stage,
+    SurveyTaskStatus,
 )
 from app.database import Base
 
@@ -390,6 +391,92 @@ Index("ix_parcels_geom", Parcel.geom, postgresql_using="gist")
 # it gets its own index rather than forcing a sequential scan the first time
 # somebody asks a real spatial question of it.
 Index("ix_parcels_boundary", Parcel.boundary, postgresql_using="gist")
+
+
+class SurveyTask(Base):
+    """One field survey job, from assignment through review.
+
+    Distinct from just registering a parcel (see Parcel, and
+    CaptureParcelModal on the frontend): a parcel is a fact on file, a survey
+    task is the work of establishing one, with a lifecycle a supervisor can
+    assign and review. `parcel_id` is nullable because a task can be
+    case-level fieldwork (a social impact assessment visit touches no one
+    parcel in particular) or tied to a specific parcel for boundary or
+    ownership verification.
+    """
+
+    __tablename__ = "survey_tasks"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id"), nullable=False, index=True)
+    parcel_id: Mapped[int | None] = mapped_column(ForeignKey("parcels.id"), nullable=True, index=True)
+    assigned_to_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
+    # Null means self-started: the officer created this from their own work
+    # queue rather than a supervisor assigning it to them.
+    assigned_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    status: Mapped[SurveyTaskStatus] = mapped_column(
+        _enum(SurveyTaskStatus, "survey_task_status"), nullable=False, default=SurveyTaskStatus.ASSIGNED
+    )
+    due_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # The assigner's instructions, when there is an assigner.
+    notes: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    measured_area_ha: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # The walked corners, kept here — separate from Parcel.boundary — until
+    # submission copies it across. A returned task can be walked again
+    # without ever having written a bad boundary onto the real parcel.
+    boundary_geom = mapped_column(
+        Geometry(geometry_type="POLYGON", srid=4326, spatial_index=False), nullable=True
+    )
+    # Where the officer stood when working this task — the same idea as
+    # Parcel.geom, one fix per task rather than per parcel.
+    location_geom = mapped_column(
+        Geometry(geometry_type="POINT", srid=4326, spatial_index=False), nullable=True
+    )
+    remarks: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    submitted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewed_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Required by the router when returning a task, optional when approving
+    # one — the same asymmetry documents.py's verify endpoint already
+    # enforces for a correction request versus a plain verify.
+    review_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+
+    case: Mapped[Case] = relationship()
+    parcel: Mapped[Parcel | None] = relationship()
+    photos: Mapped[list["SurveyPhoto"]] = relationship(back_populates="survey_task", order_by="SurveyPhoto.id")
+
+
+class SurveyPhoto(Base):
+    """One field photo against a survey task. Deliberately not a Document
+    row: uploading a second photo must not supersede the first the way a
+    re-uploaded document supersedes its earlier version — every photo taken
+    during a survey coexists with the others."""
+
+    __tablename__ = "survey_photos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    survey_task_id: Mapped[int] = mapped_column(ForeignKey("survey_tasks.id"), nullable=False, index=True)
+    stored_name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    content_type: Mapped[str] = mapped_column(String(100), nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    # The geotag at the moment the photo was taken. Plain floats, not
+    # PostGIS: nothing ever runs a spatial query against a photo, this is
+    # just an attribute of it.
+    latitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    longitude: Mapped[float | None] = mapped_column(Float, nullable=True)
+    caption: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    uploaded_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    survey_task: Mapped[SurveyTask] = relationship(back_populates="photos")
+
+
+Index("ix_survey_tasks_boundary_geom", SurveyTask.boundary_geom, postgresql_using="gist")
+Index("ix_survey_tasks_location_geom", SurveyTask.location_geom, postgresql_using="gist")
 
 
 class Compensation(Base):
