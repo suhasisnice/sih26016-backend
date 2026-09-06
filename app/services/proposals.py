@@ -21,15 +21,28 @@ from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.core.enums import CaseStatus, ProposalStatus, Role, Stage
-from app.models import Case, District, Project, Proposal, ProposalReview, State, User, Village
+from app.models import (
+    Case,
+    CaseStageHistory,
+    District,
+    Project,
+    Proposal,
+    ProposalReview,
+    State,
+    User,
+    Village,
+)
 from app.services import audit, numbering, sla
 
 # (from_status) -> {to_status: roles allowed to make that move}
 #
 # Read this as the org chart it is. The requiring body owns a proposal until
 # it is submitted and can withdraw it at any point before a decision. The
-# state scrutinises. The ministry decides. Nobody can approve their own
-# submission, because no role appears on both sides of the same hand-off.
+# state scrutinises. The ministry decides. District Officer also sits on the
+# approval step (not just scrutiny) so a district-only demo — DC scrutinises,
+# SLAO gets the case — can run without a State/Ministry login; Ministry's own
+# approval right is unchanged. Nobody approves their own submission: the
+# requiring body never appears on the approval side of any hand-off.
 TRANSITIONS: dict[ProposalStatus, dict[ProposalStatus, tuple[Role, ...]]] = {
     ProposalStatus.DRAFT: {
         ProposalStatus.SUBMITTED: (Role.REQUIRING_BODY, Role.ADMIN),
@@ -43,7 +56,7 @@ TRANSITIONS: dict[ProposalStatus, dict[ProposalStatus, tuple[Role, ...]]] = {
         ProposalStatus.WITHDRAWN: (Role.REQUIRING_BODY, Role.ADMIN),
     },
     ProposalStatus.UNDER_SCRUTINY: {
-        ProposalStatus.APPROVED: (Role.MINISTRY_OFFICER, Role.ADMIN),
+        ProposalStatus.APPROVED: (Role.MINISTRY_OFFICER, Role.DISTRICT_OFFICER, Role.ADMIN),
         ProposalStatus.REJECTED: (Role.MINISTRY_OFFICER, Role.ADMIN),
         ProposalStatus.RETURNED: (
             Role.STATE_OFFICER,
@@ -233,6 +246,17 @@ def sanction_to_case(db: Session, proposal: Proposal, user: User, on_date: date 
 
     proposal.case_id = case.id
     proposal.project_id = project.id
+
+    db.add(
+        CaseStageHistory(
+            case_id=case.id,
+            from_stage=None,
+            to_stage=Stage.PRELIMINARY_NOTIFICATION,
+            changed_by_user_id=user.id,
+            changed_on=effective,
+            note="Case opened from approved proposal",
+        )
+    )
 
     audit.record(
         db,
