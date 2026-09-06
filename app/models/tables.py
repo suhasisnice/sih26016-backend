@@ -293,13 +293,32 @@ Index("ix_parcels_boundary", Parcel.boundary, postgresql_using="gist")
 
 
 class Compensation(Base):
-    """Money for land taken. Never merged with RnRRecord."""
+    """Money for land taken. Never merged with RnRRecord.
+
+    amount_awarded is not something an officer types in: Sec. 26-30 build it
+    out of market value, statutory solatium and Sec. 34 delay interest, so
+    those three are the fields the API actually accepts, and
+    app.services.compensation.compute_award writes amount_awarded from them
+    on every change. It stays a real stored column (rather than a
+    Python-only computed property) because a sibling service
+    (sih26016-ai-layer/db/models.py) has its own model over this same table
+    and reads amount_awarded directly."""
 
     __tablename__ = "compensation"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     case_id: Mapped[int] = mapped_column(ForeignKey("cases.id"), nullable=False, index=True)
     person_id: Mapped[int] = mapped_column(ForeignKey("people.id"), nullable=False, index=True)
+    # Sec. 26: the assessed base value of the land/asset, before any
+    # statutory addition.
+    market_value_amount: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Sec. 30(1) fixes this at 100% of market value; stored rather than
+    # hardcoded so a future amendment to the rate needs no migration.
+    solatium_rate_pct: Mapped[int] = mapped_column(Integer, nullable=False, default=100)
+    # Sec. 34 delay interest. Depends on how late the award is, so it is a
+    # number the officer supplies rather than something derived from dates
+    # here.
+    interest_amount: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     amount_awarded: Mapped[int] = mapped_column(Integer, nullable=False)
     amount_paid: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     status: Mapped[CompensationStatus] = mapped_column(
