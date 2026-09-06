@@ -16,8 +16,8 @@ from datetime import date
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.core.enums import CaseStatus, Stage
-from app.models import Case, CaseStageHistory, User
+from app.core.enums import CaseStatus, ObjectionStatus, Stage, SurveyTaskStatus
+from app.models import Case, CaseStageHistory, Objection, SurveyTask, User
 from app.services import audit, sla
 
 STAGE_ORDER: list[Stage] = list(Stage)
@@ -69,6 +69,55 @@ def advance_case(
                 f"Allowed: {[s.value for s in allowed_transitions(case.stage)]}"
             ),
         )
+
+    # An objection filed under s.21 has to be disposed of before the
+    # declaration under s.19 can issue — advancing past it with the
+    # objection still open would let the declaration outrun its own record.
+    if case.stage is Stage.OBJECTION_PERIOD and to_stage is Stage.DECLARATION:
+        open_objections = (
+            db.query(Objection)
+            .filter(
+                Objection.case_id == case.id,
+                Objection.status.in_((ObjectionStatus.FILED, ObjectionStatus.UNDER_REVIEW)),
+            )
+            .count()
+        )
+        if open_objections:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Cannot move to 'declaration': {open_objections} objection(s) "
+                    "still open on this case."
+                ),
+            )
+
+    # Likewise, a survey still out with the field officer means the land
+    # under s.12 has not actually been verified yet. A case with no survey
+    # task at all is unaffected — most cases never get one assigned.
+    if case.stage is Stage.LAND_VERIFICATION and to_stage is Stage.OBJECTION_PERIOD:
+        open_surveys = (
+            db.query(SurveyTask)
+            .filter(
+                SurveyTask.case_id == case.id,
+                SurveyTask.status.in_(
+                    (
+                        SurveyTaskStatus.ASSIGNED,
+                        SurveyTaskStatus.IN_PROGRESS,
+                        SurveyTaskStatus.SUBMITTED,
+                        SurveyTaskStatus.RETURNED,
+                    )
+                ),
+            )
+            .count()
+        )
+        if open_surveys:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Cannot move to 'objection_period': {open_surveys} survey "
+                    "task(s) still open on this case."
+                ),
+            )
 
     from_stage = case.stage
     effective_date = on_date or date.today()
