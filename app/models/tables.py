@@ -329,6 +329,10 @@ class Compensation(Base):
     case: Mapped[Case] = relationship()
     person: Mapped[Person] = relationship()
 
+    # One award per household per case — the Act recognises a single
+    # compensation figure per acquisition, not several competing ones.
+    __table_args__ = (UniqueConstraint("case_id", "person_id", name="uq_compensation_case_person"),)
+
 
 class RnRRecord(Base):
     """Rehabilitation and resettlement entitlement. Deliberately a separate
