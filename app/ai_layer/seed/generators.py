@@ -46,6 +46,7 @@ from app.models import (
     Village,
 )
 from app.services import numbering, sla
+from app.services.compensation import compute_award
 
 STAGE_ORDER = list(Stage)
 
@@ -355,10 +356,19 @@ def build_case(
     award_index = STAGE_ORDER.index(Stage.AWARD)
     if stage_index >= award_index:
         award_date = transition_dates[award_index]
+        # COMPENSATION_RATE_PER_HA_RANGE was calibrated to look like a
+        # realistic total award per hectare, not a bare market value, so it
+        # is halved into market_value_amount here — Sec. 30(1)'s 100%
+        # solatium then rebuilds the same total via compute_award, giving
+        # every seeded row real components instead of a single hand-set
+        # figure.
         rate = rng.uniform(*COMPENSATION_RATE_PER_HA_RANGE)
+        solatium_rate_pct = 100
+        interest_amount = 0
         total_amount = 0
         for parcel, owner in zip(parcels, owners):
-            amount_awarded = round(parcel.area_ha * rate)
+            market_value_amount = round(parcel.area_ha * rate / 2)
+            amount_awarded = compute_award(market_value_amount, solatium_rate_pct, interest_amount)
             if force_unpaid_award:
                 amount_paid = 0
                 comp_status = CompensationStatus.AWARDED
@@ -372,6 +382,9 @@ def build_case(
                 Compensation(
                     case_id=case.id,
                     person_id=owner.id,
+                    market_value_amount=market_value_amount,
+                    solatium_rate_pct=solatium_rate_pct,
+                    interest_amount=interest_amount,
                     amount_awarded=amount_awarded,
                     amount_paid=amount_paid,
                     status=comp_status,

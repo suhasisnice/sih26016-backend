@@ -10,6 +10,7 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.enums import BenefitDeliveryStatus, CompensationStatus, Role, RnRStatus
@@ -20,6 +21,7 @@ from app.schemas.person import (
     AffectedPersonList,
     AffectedPersonOut,
     AffectedPersonUpdate,
+    CompensationCreate,
     CompensationOut,
     CompensationUpdate,
     RnrBenefitCreate,
@@ -29,6 +31,7 @@ from app.schemas.person import (
     RnRUpdate,
 )
 from app.services import audit, provenance
+from app.services.compensation import compute_award, solatium_amount
 
 router = APIRouter(prefix="/persons", tags=["persons"])
 
@@ -106,6 +109,10 @@ def list_affected_people(
                 compensation=(
                     CompensationOut(
                         id=comp.id,
+                        market_value_amount=comp.market_value_amount,
+                        solatium_rate_pct=comp.solatium_rate_pct,
+                        solatium_amount=solatium_amount(comp.market_value_amount, comp.solatium_rate_pct),
+                        interest_amount=comp.interest_amount,
                         amount_awarded=comp.amount_awarded,
                         amount_paid=comp.amount_paid,
                         amount_pending=comp.amount_awarded - comp.amount_paid,
@@ -157,6 +164,90 @@ def _visible_case_or_404(db: Session, user: User, case_id: int) -> Case:
     return case
 
 
+@compensation_router.post("", response_model=CompensationOut, status_code=status.HTTP_201_CREATED)
+def create_compensation(
+    payload: CompensationCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(*COMPENSATION_WRITERS)),
+):
+    """Declare an award for a household already recorded as affected on
+    this case. Not exposed for a household with no acquired land — see
+    add_affected_person's own note on why no compensation record is opened
+    automatically there."""
+    case = _visible_case_or_404(db, user, payload.case_id)
+
+    family = (
+        db.query(AffectedFamily)
+        .filter(AffectedFamily.case_id == case.id, AffectedFamily.person_id == payload.person_id)
+        .first()
+    )
+    if family is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="That household is not recorded as affected by this case",
+        )
+
+    existing = (
+        db.query(Compensation)
+        .filter(Compensation.case_id == case.id, Compensation.person_id == payload.person_id)
+        .first()
+    )
+    if existing is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This household already has an award on this case — update it instead of declaring a new one",
+        )
+
+    awarded = compute_award(payload.market_value_amount, payload.solatium_rate_pct, payload.interest_amount)
+    record = Compensation(
+        case_id=case.id,
+        person_id=payload.person_id,
+        market_value_amount=payload.market_value_amount,
+        solatium_rate_pct=payload.solatium_rate_pct,
+        interest_amount=payload.interest_amount,
+        amount_awarded=awarded,
+        amount_paid=0,
+        status=CompensationStatus.ASSESSED,
+        awarded_on=payload.awarded_on,
+    )
+    db.add(record)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This household already has an award on this case — update it instead of declaring a new one",
+        )
+
+    audit.record(
+        db,
+        user,
+        action="compensation.create",
+        entity_type="compensation",
+        entity_id=record.id,
+        detail=(
+            f"case={case.id} person={payload.person_id} market_value={record.market_value_amount} "
+            f"solatium_rate={record.solatium_rate_pct} interest={record.interest_amount} awarded={record.amount_awarded}"
+        ),
+    )
+    db.commit()
+    db.refresh(record)
+
+    return CompensationOut(
+        id=record.id,
+        market_value_amount=record.market_value_amount,
+        solatium_rate_pct=record.solatium_rate_pct,
+        solatium_amount=solatium_amount(record.market_value_amount, record.solatium_rate_pct),
+        interest_amount=record.interest_amount,
+        amount_awarded=record.amount_awarded,
+        amount_paid=record.amount_paid,
+        amount_pending=record.amount_awarded - record.amount_paid,
+        status=record.status,
+        awarded_on=record.awarded_on,
+    )
+
+
 @compensation_router.patch("/{compensation_id}", response_model=CompensationOut)
 def update_compensation(
     compensation_id: int,
@@ -164,7 +255,12 @@ def update_compensation(
     db: Session = Depends(get_db),
     user: User = Depends(require_role(*COMPENSATION_WRITERS)),
 ):
-    """Record an award or a payment against one household."""
+    """Record an award or a payment against one household.
+
+    amount_awarded is never accepted directly: it is Sec. 26-30 arithmetic
+    over market value, solatium and interest, recomputed here from
+    whichever of those three the request changes.
+    """
     record = db.get(Compensation, compensation_id)
     if record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Compensation record not found")
@@ -174,7 +270,11 @@ def update_compensation(
     if not fields:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields to update")
 
-    awarded = fields.get("amount_awarded", record.amount_awarded)
+    market_value = fields.get("market_value_amount", record.market_value_amount)
+    solatium_rate = fields.get("solatium_rate_pct", record.solatium_rate_pct)
+    interest = fields.get("interest_amount", record.interest_amount)
+    awarded = compute_award(market_value, solatium_rate, interest)
+
     paid = fields.get("amount_paid", record.amount_paid)
     if paid > awarded:
         raise HTTPException(
@@ -182,8 +282,13 @@ def update_compensation(
             detail=f"Amount paid (₹{paid:,}) cannot exceed the amount awarded (₹{awarded:,})",
         )
 
+    record.market_value_amount = market_value
+    record.solatium_rate_pct = solatium_rate
+    record.interest_amount = interest
+    record.amount_awarded = awarded
     for key, value in fields.items():
-        setattr(record, key, value)
+        if key in ("amount_paid", "status", "awarded_on"):
+            setattr(record, key, value)
 
     # Paying an award in full settles it. Left to the client this drifts —
     # one screen marks it paid, another forgets, and the dashboard's
@@ -197,13 +302,21 @@ def update_compensation(
         action="compensation.update",
         entity_type="compensation",
         entity_id=record.id,
-        detail=f"awarded={record.amount_awarded} paid={record.amount_paid} status={record.status.value}",
+        detail=(
+            f"market_value={record.market_value_amount} solatium_rate={record.solatium_rate_pct} "
+            f"interest={record.interest_amount} awarded={record.amount_awarded} "
+            f"paid={record.amount_paid} status={record.status.value}"
+        ),
     )
     db.commit()
     db.refresh(record)
 
     return CompensationOut(
         id=record.id,
+        market_value_amount=record.market_value_amount,
+        solatium_rate_pct=record.solatium_rate_pct,
+        solatium_amount=solatium_amount(record.market_value_amount, record.solatium_rate_pct),
+        interest_amount=record.interest_amount,
         amount_awarded=record.amount_awarded,
         amount_paid=record.amount_paid,
         amount_pending=record.amount_awarded - record.amount_paid,
@@ -546,6 +659,10 @@ def update_affected_person(
         compensation=(
             CompensationOut(
                 id=comp.id,
+                market_value_amount=comp.market_value_amount,
+                solatium_rate_pct=comp.solatium_rate_pct,
+                solatium_amount=solatium_amount(comp.market_value_amount, comp.solatium_rate_pct),
+                interest_amount=comp.interest_amount,
                 amount_awarded=comp.amount_awarded,
                 amount_paid=comp.amount_paid,
                 amount_pending=comp.amount_awarded - comp.amount_paid,
