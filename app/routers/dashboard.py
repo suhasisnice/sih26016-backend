@@ -29,10 +29,12 @@ from app.models import (
     Case,
     CaseStageHistory,
     Compensation,
+    Document,
     District,
     Objection,
     Parcel,
     Project,
+    RequiredDocument,
     RnRRecord,
     StatutoryNotice,
     User,
@@ -44,6 +46,8 @@ from app.schemas.dashboard import (
     AttentionCaseOut,
     AttentionList,
     DashboardKpis,
+    FieldWorkCaseOut,
+    FieldWorkList,
     ForecastResponse,
     StageBreakdownItem,
     TrendPoint,
@@ -338,6 +342,125 @@ def cases_requiring_attention(
     )
 
     return AttentionList(items=items[:limit], total=len(items))
+
+
+# The three stages a field officer is actually on the ground for. Sections
+# 4-9 (social impact assessment) and 12 (land verification) are surveys by
+# definition; Section 15 (objection period) is when a filed objection sends
+# someone back out to the parcel it names. Declaration onward is paperwork
+# and payment, not a site visit.
+FIELD_WORK_STAGES = (Stage.SOCIAL_IMPACT_ASSESSMENT, Stage.LAND_VERIFICATION, Stage.OBJECTION_PERIOD)
+
+
+@router.get("/field-work", response_model=FieldWorkList)
+def field_work_queue(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    limit: int = Query(default=50, ge=1, le=200),
+):
+    """What a field officer still has to go out and do.
+
+    Not every case in an on-ground stage — only ones with something a visit
+    would actually resolve: no parcel captured yet, a parcel with a GPS
+    point but no surveyed boundary (see Parcel.boundary), or a document this
+    stage requires but does not have. A case sitting in land_verification
+    with its parcels fully surveyed and its documents filed has nothing left
+    for a field visit and does not belong on this list.
+    """
+    entitled = entitled_case_ids(db, user)
+    if entitled is not None and not entitled:
+        return FieldWorkList(items=[], total=0)
+
+    query = db.query(Case).filter(Case.status == CaseStatus.ACTIVE, Case.stage.in_(FIELD_WORK_STAGES))
+    if entitled is not None:
+        query = query.filter(Case.id.in_(entitled))
+    cases = query.all()
+    if not cases:
+        return FieldWorkList(items=[], total=0)
+
+    case_ids = [c.id for c in cases]
+
+    parcel_counts: dict[int, int] = dict(
+        db.query(Parcel.case_id, func.count(Parcel.id))
+        .filter(Parcel.case_id.in_(case_ids))
+        .group_by(Parcel.case_id)
+        .all()
+    )
+    missing_boundary_counts: dict[int, int] = dict(
+        db.query(Parcel.case_id, func.count(Parcel.id))
+        .filter(Parcel.case_id.in_(case_ids), Parcel.boundary.is_(None))
+        .group_by(Parcel.case_id)
+        .all()
+    )
+
+    required_by_stage: dict[Stage, set[DocType]] = {}
+    for stage, doc_type in (
+        db.query(RequiredDocument.stage, RequiredDocument.doc_type)
+        .filter(RequiredDocument.stage.in_(FIELD_WORK_STAGES))
+        .all()
+    ):
+        required_by_stage.setdefault(stage, set()).add(doc_type)
+
+    present_by_case: dict[int, set[DocType]] = {}
+    for case_id, doc_type in (
+        db.query(Document.case_id, Document.doc_type)
+        .filter(Document.case_id.in_(case_ids), Document.is_current.is_(True))
+        .all()
+    ):
+        present_by_case.setdefault(case_id, set()).add(doc_type)
+
+    family_counts = dict(
+        db.query(AffectedFamily.case_id, func.count(AffectedFamily.id))
+        .filter(AffectedFamily.case_id.in_(case_ids))
+        .group_by(AffectedFamily.case_id)
+        .all()
+    )
+
+    projects = {p.id: p.name for p in db.query(Project).filter(Project.id.in_({c.project_id for c in cases}))}
+    villages = {v.id: v.name for v in db.query(Village).filter(Village.id.in_({c.village_id for c in cases}))}
+    districts = {
+        d.id: d.name for d in db.query(District).filter(District.id.in_({c.district_id for c in cases}))
+    }
+
+    today = date.today()
+    sla_table = sla.load_sla(db)
+
+    items = []
+    for case in cases:
+        parcel_count = parcel_counts.get(case.id, 0)
+        parcels_missing_boundary = missing_boundary_counts.get(case.id, 0)
+        missing_docs = sorted(
+            required_by_stage.get(case.stage, set()) - present_by_case.get(case.id, set()),
+            key=lambda d: d.value,
+        )
+        no_parcels_yet = parcel_count == 0 and case.stage != Stage.SOCIAL_IMPACT_ASSESSMENT
+        if parcels_missing_boundary == 0 and not missing_docs and not no_parcels_yet:
+            continue
+
+        items.append(
+            FieldWorkCaseOut(
+                case_id=case.id,
+                case_number=case.case_number,
+                title=case.title,
+                project_name=projects.get(case.project_id, ""),
+                village_name=villages.get(case.village_id, ""),
+                district_name=districts.get(case.district_id, ""),
+                stage=case.stage,
+                stage_due_on=case.stage_due_on,
+                days_remaining=sla.days_remaining(case.stage_due_on, today),
+                timeline_status=sla.timeline_status(case.stage_due_on, case.stage, today, sla_table),
+                parcel_count=parcel_count,
+                parcels_missing_boundary=parcels_missing_boundary,
+                missing_document_types=missing_docs,
+                affected_family_count=family_counts.get(case.id, 0),
+            )
+        )
+
+    # Overdue first, then soonest deadline — same ordering rule as
+    # /attention, since a field officer's queue is triaged the same way.
+    items.sort(key=lambda i: (i.days_remaining if i.days_remaining is not None else 9999,))
+
+    return FieldWorkList(items=items[:limit], total=len(items))
 
 
 @router.get("/cases-by-stage", response_model=list[StageBreakdownItem])
