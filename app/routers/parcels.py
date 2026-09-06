@@ -22,7 +22,7 @@ from app.schemas.geo import (
     PolygonGeometry,
 )
 from app.schemas.mutation import MutationRequestList, MutationRequestOut
-from app.services import audit
+from app.services import audit, provenance
 
 router = APIRouter(prefix="/parcels", tags=["parcels"])
 
@@ -132,6 +132,7 @@ def parcels_in_bbox(
                 longitude=float(lon),
                 latitude=float(lat),
                 has_boundary=boundary is not None,
+                provenance=provenance.out(parcel),
             ),
         )
         for parcel, case_number, owner_name, lon, lat, boundary in rows
@@ -173,6 +174,7 @@ def search_parcels(
             owner_name=owner_name,
             longitude=float(lon),
             latitude=float(lat),
+            provenance=provenance.out(parcel),
         )
         for parcel, owner_name, lon, lat in rows
     ]
@@ -208,6 +210,7 @@ def list_parcels_for_case(
             owner_name=owner_name,
             longitude=float(lon),
             latitude=float(lat),
+            provenance=provenance.out(parcel),
         )
         for parcel, owner_name, lon, lat in rows
     ]
@@ -252,6 +255,7 @@ def get_parcel(
         owner_name=owner_name,
         longitude=float(lon),
         latitude=float(lat),
+        provenance=provenance.out(parcel),
     )
 
 
@@ -269,6 +273,7 @@ def _parcel_out(parcel: Parcel, owner_name: str, lon: float, lat: float) -> Parc
         owner_name=owner_name,
         longitude=float(lon),
         latitude=float(lat),
+        provenance=provenance.out(parcel),
     )
 
 

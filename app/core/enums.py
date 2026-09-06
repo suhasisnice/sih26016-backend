@@ -232,6 +232,30 @@ class DocumentVerificationStatus(str, Enum):
     CORRECTION_REQUESTED = "correction_requested"
 
 
+class DataSource(str, Enum):
+    """Where a record's data actually came from — the honesty layer over
+    every entity a demo might be judged on. `OFFICIAL` is reserved for data
+    traceable to a real, cited government dataset; nothing in this codebase
+    sets it today, because none exists here to cite. `PUBLIC_REFERENCE`
+    covers real, well-known facts (a real district or village name, a real
+    requiring body) used for realism without a specific dataset behind
+    them. Everything this prototype invents — every case, parcel, person,
+    project — is `SYNTHETIC`."""
+    OFFICIAL = "official"
+    PUBLIC_REFERENCE = "public_reference"
+    SYNTHETIC = "synthetic"
+
+
+class ProvenanceStatus(str, Enum):
+    """Whether a record's DataSource claim has actually been checked.
+    Distinct from DocumentVerificationStatus, which is an officer's review
+    of one filed document — this is a blanket statement about how a row
+    entered the database at all."""
+    VERIFIED = "verified"
+    UNVERIFIED = "unverified"
+    SYNTHETIC = "synthetic"
+
+
 class BiometricKind(str, Enum):
     """Which factor a stored biometric credential or a login attempt is.
 

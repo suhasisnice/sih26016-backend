@@ -6,10 +6,38 @@ that exists once, not once per case -- everything else in the seed refers
 back to the rows this module creates.
 """
 
+from datetime import date
+
 from app.ai_layer.constants import DEMO_PASSWORD, DISTRICT_LGD, DISTRICT_NAMES, SECONDARY_STATES
-from app.core.enums import DocType, Role, Stage
+from app.core.enums import DataSource, DocType, ProvenanceStatus, Role, Stage
 from app.core.security import hash_password
 from app.models import District, Project, RequiredDocument, State, User, Village
+
+# Real Indian administrative names, used for realism, with no citable
+# dataset behind them in this environment — see DataSource's docstring in
+# app.core.enums. Every seeded State/District/Village row gets this; every
+# Project/Case/Parcel/Person the generators invent stays at the model
+# default (SYNTHETIC) instead.
+_PLACE_PROVENANCE = {
+    "data_source": DataSource.PUBLIC_REFERENCE,
+    "provenance_status": ProvenanceStatus.UNVERIFIED,
+    "source_name": (
+        "Real Indian administrative name used for realism; not sourced from "
+        "a specific verified dataset in this prototype"
+    ),
+    "retrieved_at": date.today(),
+}
+
+# The generators' own default (DataSource.SYNTHETIC / ProvenanceStatus.SYNTHETIC
+# on the model) already covers correctness; this adds the source_name/
+# retrieved_at metadata the plain default leaves null, for every Project,
+# Case, Parcel and Person the seed invents.
+SYNTHETIC_PROVENANCE = {
+    "data_source": DataSource.SYNTHETIC,
+    "provenance_status": ProvenanceStatus.SYNTHETIC,
+    "source_name": "Bhoomimitra prototype seed generator",
+    "retrieved_at": date.today(),
+}
 
 KARNATAKA_VILLAGES: dict[str, list[str]] = {
     "Bengaluru Rural": ["Devanahalli", "Doddaballapura", "Hoskote", "Nelamangala", "Vijayapura"],
@@ -86,7 +114,9 @@ def seed_states_and_districts(db) -> tuple[dict[str, District], dict[str, State]
     Returns every district and every state, each keyed by name."""
     from app.ai_layer.constants import STATE, STATE_CODE, STATE_LGD
 
-    karnataka = State(name=STATE, code=STATE_CODE, lgd_code=STATE_LGD, is_union_territory=False)
+    karnataka = State(
+        name=STATE, code=STATE_CODE, lgd_code=STATE_LGD, is_union_territory=False, **_PLACE_PROVENANCE
+    )
     db.add(karnataka)
     db.flush()
     states: dict[str, State] = {STATE: karnataka}
@@ -105,19 +135,26 @@ def seed_states_and_districts(db) -> tuple[dict[str, District], dict[str, State]
             state_id=karnataka.id,
             code=district_codes[name],
             lgd_code=DISTRICT_LGD.get(name),
+            **_PLACE_PROVENANCE,
         )
         db.add(district)
         districts[name] = district
     db.flush()
 
     for state_name, state_code, state_lgd, is_ut, district_rows in SECONDARY_STATES:
-        state = State(name=state_name, code=state_code, lgd_code=state_lgd, is_union_territory=is_ut)
+        state = State(
+            name=state_name, code=state_code, lgd_code=state_lgd, is_union_territory=is_ut, **_PLACE_PROVENANCE
+        )
         db.add(state)
         db.flush()
         states[state_name] = state
         for district_name, district_code, district_lgd in district_rows:
             district = District(
-                name=district_name, state_id=state.id, code=district_code, lgd_code=district_lgd
+                name=district_name,
+                state_id=state.id,
+                code=district_code,
+                lgd_code=district_lgd,
+                **_PLACE_PROVENANCE,
             )
             db.add(district)
             districts[district_name] = district
@@ -132,7 +169,7 @@ def seed_villages(db, districts: dict[str, District]) -> dict[str, list[Village]
     for district_name, names in {**KARNATAKA_VILLAGES, **SECONDARY_VILLAGES}.items():
         district = districts[district_name]
         rows = [
-            Village(name=name, district_id=district.id, lgd_code=district.lgd_code)
+            Village(name=name, district_id=district.id, lgd_code=district.lgd_code, **_PLACE_PROVENANCE)
             for name in names
         ]
         db.add_all(rows)
@@ -151,11 +188,20 @@ def seed_required_documents(db) -> None:
 
 def seed_projects(db, districts: dict[str, District]) -> list[Project]:
     projects = [
-        Project(name=name, requiring_body=body, district_id=districts[district_name].id)
+        Project(
+            name=name, requiring_body=body, district_id=districts[district_name].id, **SYNTHETIC_PROVENANCE
+        )
         for name, body, district_name in KARNATAKA_PROJECTS
     ]
     for district_name, (name, body) in SECONDARY_PROJECTS.items():
-        projects.append(Project(name=name, requiring_body=body, district_id=districts[district_name].id))
+        projects.append(
+            Project(
+                name=name,
+                requiring_body=body,
+                district_id=districts[district_name].id,
+                **SYNTHETIC_PROVENANCE,
+            )
+        )
     db.add_all(projects)
     db.flush()
     return projects

@@ -21,7 +21,7 @@ from app.ai_layer.constants import (
     PARCEL_AREA_HA_RANGE,
 )
 import app.ai_layer.seed.geo as geo
-from app.ai_layer.seed.reference import REQUIRED_DOCUMENTS
+from app.ai_layer.seed.reference import REQUIRED_DOCUMENTS, SYNTHETIC_PROVENANCE
 from app.core.enums import (
     CaseStatus,
     CompensationStatus,
@@ -91,6 +91,7 @@ def make_people(
             village_id=village.id,
             phone=f"{FAKE_PHONE_PREFIX}{i:05d}",
             has_land_title=rng.random() >= LANDLESS_AFFECTED_FRACTION,
+            **SYNTHETIC_PROVENANCE,
         )
         db.add(person)
         people.append(person)
@@ -189,6 +190,7 @@ def build_case(
         stage_due_on=stage_due_on,
         created_at=created_at,
         consent_threshold_pct=consent_threshold_pct,
+        **SYNTHETIC_PROVENANCE,
     )
     db.add(case)
     db.flush()
@@ -226,6 +228,7 @@ def build_case(
             status=parcel_status,
             geom=geo.point_ewkt(lat, lon),
             boundary=geo.small_square_ewkt(lat, lon),
+            **SYNTHETIC_PROVENANCE,
         )
         db.add(parcel)
         parcels.append(parcel)

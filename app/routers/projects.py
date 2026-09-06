@@ -23,7 +23,7 @@ from app.core.enums import ParcelStatus, TimelineStatus
 from app.dependencies import entitled_case_ids, get_current_user, get_db
 from app.models import Alert, Case, CaseStageHistory, District, Parcel, Project, User
 from app.schemas.project import ProjectWorkspaceList, ProjectWorkspaceOut
-from app.services import sla
+from app.services import provenance, sla
 
 # Not "/projects" — app.routers.reference already owns that path for the
 # plain unscoped dropdown list every create-form uses (GET /projects,
@@ -110,6 +110,7 @@ def _rollup(db: Session, project: Project, district_name: str, case_ids: list[in
         responsible_officer_name=responsible_name,
         pending_action_count=int(pending_actions),
         deadline_status=worst_deadline,
+        provenance=provenance.out(project),
     )
 
 
