@@ -53,3 +53,8 @@ Pillow==12.3.0
 # backend).
 pyotp==2.9.0
 qrcode==8.0
+
+# Live WhatsApp delivery for NOTIFICATION_PROVIDER=live — see
+# app/integrations/messaging/live.py. Email on that same provider uses
+# smtplib from the standard library, so it adds no dependency of its own.
+twilio==9.11.0
