@@ -132,6 +132,22 @@ class CompensationUpdate(BaseModel):
     awarded_on: date | None = None
 
 
+class CompensationCreate(BaseModel):
+    """Declare an award for a household already recorded as affected on a
+    case. market_value_amount is required — solatium is a percentage of it,
+    so there is nothing to compute without one — while solatium_rate_pct
+    defaults to the Sec. 30(1) statutory rate and interest_amount defaults
+    to zero, since an award is not yet late the moment it is first declared.
+    """
+
+    case_id: int
+    person_id: int
+    market_value_amount: int = Field(ge=0)
+    solatium_rate_pct: int = Field(default=100, ge=0, le=100)
+    interest_amount: int = Field(default=0, ge=0)
+    awarded_on: date | None = None
+
+
 class RnRUpdate(BaseModel):
     """Rehabilitation and resettlement, edited separately from compensation.
 
