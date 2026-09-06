@@ -20,6 +20,12 @@ Who gets what is decided here, once, rather than in each rule:
   it is a fact about their case, not a finding about the office's
   performance, and it is the reason the "does severity matter to a
   landowner" question had a real answer to build toward.
+- Both of those also reach WhatsApp, not just the in-app inbox, when the
+  landowner has a phone number on file (Person.phone) and owns a parcel on
+  the case in question — see the calls into
+  app.services.landowner_notify.notify_account_holder_whatsapp below. An
+  in-app notification only reaches someone who thinks to open the portal;
+  most of these families do not.
 
 Fan-out is deliberately bounded: notifications go to district-scoped
 officers and state officers for the state in question, never to every admin
@@ -30,7 +36,8 @@ case and the inbox would be unusable on the first night.
 from sqlalchemy.orm import Session
 
 from app.core.enums import AlertSeverity, Role
-from app.models import Alert, Case, Notification, Parcel, User
+from app.models import Alert, Case, Notification, Parcel, Person, User
+from app.services import landowner_notify
 
 # Which roles care about which rule. A rule not listed here goes to the
 # general set — better to over-notify a district officer than to drop a
@@ -226,7 +233,16 @@ def notify_case_landowners(
     notification, because each is a different person entitled to know.
     Does not commit — the caller owns the transaction, same as fan_out.
     """
-    owner_person_ids = db.query(Parcel.owner_id).filter(Parcel.case_id == case.id).distinct()
+    parcels = db.query(Parcel).filter(Parcel.case_id == case.id).all()
+    owner_person_ids = {p.owner_id for p in parcels}
+    # First parcel found per owner, only to give the WhatsApp send below
+    # something to log against — an owner with several parcels on one case
+    # still gets a single message about a case-level event, not one per
+    # parcel.
+    parcel_by_owner_id = {}
+    for p in parcels:
+        parcel_by_owner_id.setdefault(p.owner_id, p)
+
     landowner_users = (
         db.query(User)
         .filter(
@@ -238,6 +254,12 @@ def notify_case_landowners(
     )
     for owner in landowner_users:
         notify_user(db, owner.id, title, body, severity=severity, case_id=case.id, rule=rule)
+
+        person = db.get(Person, owner.person_id) if owner.person_id else None
+        parcel = parcel_by_owner_id.get(owner.person_id)
+        if person and person.phone and parcel:
+            landowner_notify.notify_account_holder_whatsapp(db, parcel, person.phone, body)
+
     return len(landowner_users)
 
 
@@ -268,4 +290,15 @@ def notify_objection_filer(
     if filer is None:
         return False
     notify_user(db, filer.id, title, body, severity=severity, case_id=case.id, rule=None)
+
+    person = db.get(Person, objection.person_id)
+    if person and person.phone:
+        parcel = (
+            db.query(Parcel)
+            .filter(Parcel.case_id == case.id, Parcel.owner_id == person.id)
+            .first()
+        )
+        if parcel:
+            landowner_notify.notify_account_holder_whatsapp(db, parcel, person.phone, body)
+
     return True
