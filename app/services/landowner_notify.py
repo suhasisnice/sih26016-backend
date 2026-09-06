@@ -119,6 +119,33 @@ def _send_one(db, provider, parcel, channel, recipient, notification_type, *, se
     return log
 
 
+def notify_account_holder_whatsapp(db: Session, parcel: Parcel, phone: str, body: str) -> NotificationLog:
+    """WhatsApp a case event straight to a logged-in landowner's own phone
+    number (Person.phone), independent of the anonymous /notices/subscribe
+    flow above.
+
+    Called from app.services.notify's notify_case_landowners and
+    notify_objection_filer — the two places a landowner with a real
+    BhoomiMitra account learns something about their own case. Until this
+    existed, an account holder only ever got an in-app inbox item; someone
+    who has never opened the portal but does carry a phone on file had no
+    way to hear about it at all. Reuses the same provider and NotificationLog
+    ledger as notify_landowner so a real vendor failure shows up in exactly
+    the same place, logged against the parcel the event is actually about
+    rather than inventing a second ledger keyed by user.
+
+    Never raises, for the same reason notify_landowner never does: an
+    officer advancing a case's stage or answering an objection must not
+    fail because a citizen's phone number bounced.
+    """
+    provider = messaging.get_provider()
+    return _send_one(
+        db, provider, parcel, NotificationChannel.WHATSAPP,
+        phone, STATUS_UPDATE,
+        send=lambda to: provider.send_whatsapp(to, body),
+    )
+
+
 def label_for_stage(stage_value: str) -> tuple[str, str]:
     """(notification_type, status_label) for the case's CURRENT stage —
     used at subscribe time, when there's no specific event, just "here's
