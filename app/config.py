@@ -15,7 +15,24 @@ class Settings(BaseSettings):
     land_records_provider: str = "mock"
     # "mock" (default) logs instead of sending — see
     # app.integrations.messaging for the WhatsApp/email provider seam.
+    # "live" sends WhatsApp via Twilio and email via SMTP; see
+    # app.integrations.messaging.live for the credential vars it reads.
     notification_provider: str = "mock"
+
+    # Twilio WhatsApp — used only when notification_provider="live".
+    # twilio_whatsapp_from is Twilio's own number in "whatsapp:+1415..."
+    # form (the sandbox number while testing), not the recipient's.
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_whatsapp_from: str = ""
+
+    # SMTP email — used only when notification_provider="live".
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_username: str = ""
+    smtp_password: str = ""
+    smtp_from_email: str = ""
+    smtp_use_tls: bool = True
     rules_interval_minutes: int = 0
     login_rate_limit_attempts: int = 10
     login_rate_limit_window_seconds: int = 300

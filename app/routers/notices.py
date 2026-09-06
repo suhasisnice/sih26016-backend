@@ -303,6 +303,10 @@ class SubscribeResponse(BaseModel):
     # success, and tell a real send failure apart from "wasn't asked for".
     whatsapp_status: str | None = None
     email_status: str | None = None
+    # Off NotificationLog.is_mock for this attempt — lets the frontend show
+    # "not actually delivered" only while NOTIFICATION_PROVIDER is still
+    # "mock", instead of hardcoding that caption forever (see live.py).
+    is_mock: bool = True
 
 
 @router.post("/subscribe", response_model=SubscribeResponse, status_code=status.HTTP_201_CREATED)
@@ -396,6 +400,10 @@ def subscribe(payload: SubscribeRequest, db: Session = Depends(get_db)):
         message="You're subscribed to updates on this land.",
         whatsapp_status=whatsapp_status,
         email_status=email_status,
+        # True if no attempt was made too (nothing chosen) — there's nothing
+        # "actually delivered" to caption either way, so mock is the safe
+        # default rather than a bare False with no send behind it.
+        is_mock=all(log.is_mock for log in logs) if logs else True,
     )
 
 

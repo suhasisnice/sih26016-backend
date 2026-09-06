@@ -8,10 +8,12 @@ sending down entirely.
 
 from app.config import settings
 from app.integrations.messaging.base import MessagingProvider, ProviderInfo
+from app.integrations.messaging.live import LiveMessagingProvider
 from app.integrations.messaging.mock import MockMessagingProvider
 
 REGISTRY = {
     MockMessagingProvider.info.key: MockMessagingProvider,
+    LiveMessagingProvider.info.key: LiveMessagingProvider,
 }
 
 
