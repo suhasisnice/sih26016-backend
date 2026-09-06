@@ -12,7 +12,7 @@ from datetime import date
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.enums import CompensationStatus, RnRStatus
+from app.core.enums import BenefitCategory, BenefitDeliveryStatus, CompensationStatus, RnRStatus
 
 
 class CompensationOut(BaseModel):
@@ -33,6 +33,44 @@ class RnROut(BaseModel):
     status: RnRStatus
     entitlement: str | None
     updated_on: date
+
+
+class RnrBenefitOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    rnr_record_id: int
+    category: BenefitCategory
+    description: str | None
+    responsible_department: str | None
+    approved_on: date | None
+    expected_on: date | None
+    delivery_status: BenefitDeliveryStatus
+    evidence_document_id: int | None
+    note: str | None
+    updated_on: date
+
+
+class RnrBenefitCreate(BaseModel):
+    category: BenefitCategory
+    description: str | None = Field(default=None, max_length=200)
+    responsible_department: str | None = Field(default=None, max_length=120)
+    approved_on: date | None = None
+    expected_on: date | None = None
+
+
+class RnrBenefitUpdate(BaseModel):
+    """Every field optional so a benefit can be nudged along one attribute
+    at a time — e.g. marking it delivered without restating who's
+    responsible for it."""
+
+    description: str | None = Field(default=None, max_length=200)
+    responsible_department: str | None = Field(default=None, max_length=120)
+    approved_on: date | None = None
+    expected_on: date | None = None
+    delivery_status: BenefitDeliveryStatus | None = None
+    evidence_document_id: int | None = None
+    note: str | None = Field(default=None, max_length=500)
 
 
 class AffectedPersonOut(BaseModel):

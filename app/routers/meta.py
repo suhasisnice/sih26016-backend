@@ -3,9 +3,12 @@ from sqlalchemy import text
 
 from app.core.enums import (
     AlertSeverity,
+    BenefitCategory,
+    BenefitDeliveryStatus,
     CaseStatus,
     CompensationStatus,
     DocType,
+    DocumentVerificationStatus,
     NoticeType,
     ObjectionStatus,
     ParcelStatus,
@@ -54,4 +57,7 @@ def get_enums():
         "notice_types": _values(NoticeType),
         "timeline_statuses": _values(TimelineStatus),
         "risk_bands": _values(RiskBand),
+        "document_verification_statuses": _values(DocumentVerificationStatus),
+        "benefit_categories": _values(BenefitCategory),
+        "benefit_delivery_statuses": _values(BenefitDeliveryStatus),
     }
