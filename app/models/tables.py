@@ -38,6 +38,7 @@ from app.core.enums import (
     BiometricKind,
     CaseStatus,
     CompensationStatus,
+    DataSource,
     DocType,
     DocumentVerificationStatus,
     MutationStatus,
@@ -47,6 +48,7 @@ from app.core.enums import (
     ObjectionStatus,
     ParcelStatus,
     ProposalStatus,
+    ProvenanceStatus,
     RnRStatus,
     Role,
     Stage,
@@ -59,6 +61,18 @@ def _enum(enum_cls, name: str):
     name. Without values_callable SQLAlchemy would persist "AWARD" while
     the API returns "award", and every comparison would need translating."""
     return Enum(enum_cls, name=name, values_callable=lambda e: [m.value for m in e])
+
+
+# The same five columns appear on District, State, Village, Project, Case,
+# Parcel and Person — see DataSource's docstring in app.core.enums. Declared
+# inline on each class rather than via a mixin, consistent with how every
+# other model in this file writes its columns flatly:
+#
+#   data_source: Mapped[DataSource] = mapped_column(_enum(DataSource, "data_source"), nullable=False, default=DataSource.SYNTHETIC)
+#   source_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+#   source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+#   retrieved_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+#   provenance_status: Mapped[ProvenanceStatus] = mapped_column(_enum(ProvenanceStatus, "provenance_status"), nullable=False, default=ProvenanceStatus.SYNTHETIC)
 
 
 class User(Base):
@@ -127,6 +141,17 @@ class State(Base):
     lgd_code: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
     is_union_territory: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
+    # See DataSource in app.core.enums: real state names, no cited dataset.
+    data_source: Mapped[DataSource] = mapped_column(
+        _enum(DataSource, "data_source"), nullable=False, default=DataSource.SYNTHETIC
+    )
+    source_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    retrieved_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    provenance_status: Mapped[ProvenanceStatus] = mapped_column(
+        _enum(ProvenanceStatus, "provenance_status"), nullable=False, default=ProvenanceStatus.SYNTHETIC
+    )
+
     districts: Mapped[list["District"]] = relationship(back_populates="state")
 
 
@@ -142,6 +167,17 @@ class District(Base):
     code: Mapped[str] = mapped_column(String(4), nullable=False, unique=True)
     lgd_code: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
 
+    # See DataSource in app.core.enums: real district names, no cited dataset.
+    data_source: Mapped[DataSource] = mapped_column(
+        _enum(DataSource, "data_source"), nullable=False, default=DataSource.SYNTHETIC
+    )
+    source_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    retrieved_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    provenance_status: Mapped[ProvenanceStatus] = mapped_column(
+        _enum(ProvenanceStatus, "provenance_status"), nullable=False, default=ProvenanceStatus.SYNTHETIC
+    )
+
     state: Mapped[State] = relationship(back_populates="districts")
     villages: Mapped[list["Village"]] = relationship(back_populates="district")
 
@@ -154,6 +190,17 @@ class Village(Base):
     district_id: Mapped[int] = mapped_column(ForeignKey("districts.id"), nullable=False, index=True)
     lgd_code: Mapped[str | None] = mapped_column(String(10), nullable=True, index=True)
 
+    # See DataSource in app.core.enums: real village names, no cited dataset.
+    data_source: Mapped[DataSource] = mapped_column(
+        _enum(DataSource, "data_source"), nullable=False, default=DataSource.SYNTHETIC
+    )
+    source_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    retrieved_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    provenance_status: Mapped[ProvenanceStatus] = mapped_column(
+        _enum(ProvenanceStatus, "provenance_status"), nullable=False, default=ProvenanceStatus.SYNTHETIC
+    )
+
     district: Mapped[District] = relationship(back_populates="villages")
 
 
@@ -164,6 +211,19 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     requiring_body: Mapped[str] = mapped_column(String(120), nullable=False)
     district_id: Mapped[int] = mapped_column(ForeignKey("districts.id"), nullable=False, index=True)
+
+    # See DataSource in app.core.enums: every project in this prototype is
+    # invented, since no real, citable acquisition-project dataset is
+    # available in this environment.
+    data_source: Mapped[DataSource] = mapped_column(
+        _enum(DataSource, "data_source"), nullable=False, default=DataSource.SYNTHETIC
+    )
+    source_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    retrieved_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    provenance_status: Mapped[ProvenanceStatus] = mapped_column(
+        _enum(ProvenanceStatus, "provenance_status"), nullable=False, default=ProvenanceStatus.SYNTHETIC
+    )
 
     district: Mapped[District] = relationship()
 
@@ -180,6 +240,19 @@ class Person(Base):
     village_id: Mapped[int] = mapped_column(ForeignKey("villages.id"), nullable=False, index=True)
     phone: Mapped[str | None] = mapped_column(String(15), nullable=True)
     has_land_title: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+
+    # See DataSource in app.core.enums. Every person in this prototype is
+    # invented — real landowner identity is exactly the kind of private,
+    # sensitive data this project must not source or expose.
+    data_source: Mapped[DataSource] = mapped_column(
+        _enum(DataSource, "data_source"), nullable=False, default=DataSource.SYNTHETIC
+    )
+    source_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    retrieved_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    provenance_status: Mapped[ProvenanceStatus] = mapped_column(
+        _enum(ProvenanceStatus, "provenance_status"), nullable=False, default=ProvenanceStatus.SYNTHETIC
+    )
 
     village: Mapped[Village] = relationship()
 
@@ -216,6 +289,19 @@ class Case(Base):
     # circular (neither could be created before the other) and, worse, gave
     # one relationship two columns that could disagree with no way to tell
     # which was right. A case finds its proposal with one indexed lookup.
+
+    # See DataSource in app.core.enums. Every case in this prototype is
+    # invented — there is no real acquisition case-level dataset available
+    # in this environment to source one from.
+    data_source: Mapped[DataSource] = mapped_column(
+        _enum(DataSource, "data_source"), nullable=False, default=DataSource.SYNTHETIC
+    )
+    source_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    retrieved_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    provenance_status: Mapped[ProvenanceStatus] = mapped_column(
+        _enum(ProvenanceStatus, "provenance_status"), nullable=False, default=ProvenanceStatus.SYNTHETIC
+    )
 
     project: Mapped[Project] = relationship()
     district: Mapped[District] = relationship()
@@ -277,6 +363,20 @@ class Parcel(Base):
     # drawn as though somebody had.
     boundary = mapped_column(
         Geometry(geometry_type="POLYGON", srid=4326, spatial_index=False), nullable=True
+    )
+
+    # See DataSource in app.core.enums. The GPS point sits inside a real
+    # district's real bounding box, but the exact coordinate and every other
+    # field on this row are invented — there is no real parcel-level
+    # geospatial dataset available in this environment.
+    data_source: Mapped[DataSource] = mapped_column(
+        _enum(DataSource, "data_source"), nullable=False, default=DataSource.SYNTHETIC
+    )
+    source_name: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    retrieved_at: Mapped[date | None] = mapped_column(Date, nullable=True)
+    provenance_status: Mapped[ProvenanceStatus] = mapped_column(
+        _enum(ProvenanceStatus, "provenance_status"), nullable=False, default=ProvenanceStatus.SYNTHETIC
     )
 
     case: Mapped[Case] = relationship(back_populates="parcels")

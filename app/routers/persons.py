@@ -28,7 +28,7 @@ from app.schemas.person import (
     RnROut,
     RnRUpdate,
 )
-from app.services import audit
+from app.services import audit, provenance
 
 router = APIRouter(prefix="/persons", tags=["persons"])
 
@@ -125,6 +125,7 @@ def list_affected_people(
                     if entitlement
                     else None
                 ),
+                provenance=provenance.out(person),
             )
         )
 
@@ -455,6 +456,7 @@ def add_affected_person(
             entitlement=entitlement.entitlement,
             updated_on=entitlement.updated_on,
         ),
+        provenance=provenance.out(person),
     )
 
 
@@ -563,4 +565,5 @@ def update_affected_person(
             if entitlement
             else None
         ),
+        provenance=provenance.out(person),
     )

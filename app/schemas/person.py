@@ -13,6 +13,7 @@ from datetime import date
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.enums import BenefitCategory, BenefitDeliveryStatus, CompensationStatus, RnRStatus
+from app.schemas.provenance import ProvenanceOut
 
 
 class CompensationOut(BaseModel):
@@ -94,6 +95,7 @@ class AffectedPersonOut(BaseModel):
     # read as "awarded nothing", which is a different statement.
     compensation: CompensationOut | None = None
     rnr: RnROut | None = None
+    provenance: ProvenanceOut
 
 
 class AffectedPersonList(BaseModel):

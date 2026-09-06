@@ -42,7 +42,7 @@ from app.schemas import (
 )
 from app.schemas.audit import AuditEntryOut, AuditList
 from app.schemas.fund_deposit import FundDepositCreate, FundDepositList, FundDepositOut
-from app.services import audit, notify, numbering, sla, workflow
+from app.services import audit, notify, numbering, provenance, sla, workflow
 
 router = APIRouter(prefix="/cases", tags=["cases"])
 
@@ -261,6 +261,7 @@ def get_case(case_id: int, db: Session = Depends(get_db), user: User = Depends(g
         consent_family_count=consent_total,
         consent_given_count=consent_given,
         consent_obtained_pct=consent_pct,
+        provenance=provenance.out(case),
     )
 
 

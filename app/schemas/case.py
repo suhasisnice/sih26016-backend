@@ -3,6 +3,7 @@ from datetime import date
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.enums import CaseStatus, Stage, TimelineStatus
+from app.schemas.provenance import ProvenanceOut
 
 
 class CaseCreate(BaseModel):
@@ -123,6 +124,7 @@ class CaseDetail(BaseModel):
     consent_family_count: int = 0
     consent_given_count: int = 0
     consent_obtained_pct: float | None = None
+    provenance: ProvenanceOut
 
 
 class CaseUpdate(BaseModel):

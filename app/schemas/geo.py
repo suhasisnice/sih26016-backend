@@ -11,6 +11,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.core.enums import ParcelStatus
+from app.schemas.provenance import ProvenanceOut
 
 ULPIN_RE = re.compile(r"^[A-Z0-9]{14}$")
 
@@ -28,6 +29,7 @@ class ParcelOut(BaseModel):
     owner_name: str
     longitude: float
     latitude: float
+    provenance: ProvenanceOut
 
 
 class PointGeometry(BaseModel):
@@ -80,6 +82,7 @@ class ParcelProperties(BaseModel):
     # says so in the sidebar; a reviewer is entitled to know which they are
     # looking at.
     has_boundary: bool = False
+    provenance: ProvenanceOut
 
 
 class ParcelFeature(BaseModel):

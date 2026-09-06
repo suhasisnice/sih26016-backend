@@ -11,6 +11,7 @@ the same discipline).
 from pydantic import BaseModel
 
 from app.core.enums import Stage, TimelineStatus
+from app.schemas.provenance import ProvenanceOut
 
 
 class ProjectWorkspaceOut(BaseModel):
@@ -47,6 +48,7 @@ class ProjectWorkspaceOut(BaseModel):
     # at_risk beats on_time beats untracked, the same ranking
     # app.services.sla already establishes for one case.
     deadline_status: TimelineStatus
+    provenance: ProvenanceOut
 
 
 class ProjectWorkspaceList(BaseModel):
