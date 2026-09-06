@@ -12,9 +12,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.core.enums import CompensationStatus, Role, RnRStatus
+from app.core.enums import BenefitDeliveryStatus, CompensationStatus, Role, RnRStatus
 from app.dependencies import get_current_user, get_db, require_role, scope_cases_to_user
-from app.models import AffectedFamily, Case, Compensation, Parcel, Person, RnRRecord, User, Village
+from app.models import AffectedFamily, Case, Compensation, Document, Parcel, Person, RnRRecord, RnrBenefit, User, Village
 from app.schemas.person import (
     AffectedPersonCreate,
     AffectedPersonList,
@@ -22,6 +22,9 @@ from app.schemas.person import (
     AffectedPersonUpdate,
     CompensationOut,
     CompensationUpdate,
+    RnrBenefitCreate,
+    RnrBenefitOut,
+    RnrBenefitUpdate,
     RnROut,
     RnRUpdate,
 )
@@ -245,6 +248,122 @@ def update_rnr(
         entitlement=record.entitlement,
         updated_on=record.updated_on,
     )
+
+
+# Delivery states that represent a problem, not a milestone. Same idea as
+# document verification's mandatory-note-unless-verified rule: a plain
+# "delivered" or "approved" needs no explanation, but flagging a benefit
+# as failed or needing review does.
+BENEFIT_NOTE_REQUIRED_STATUSES = (BenefitDeliveryStatus.FAILED, BenefitDeliveryStatus.REVIEW_REQUIRED)
+
+
+def _visible_rnr_record_or_404(db: Session, user: User, rnr_id: int) -> RnRRecord:
+    record = db.get(RnRRecord, rnr_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="R&R record not found")
+    _visible_case_or_404(db, user, record.case_id)
+    return record
+
+
+@rnr_router.get("/{rnr_id}/benefits", response_model=list[RnrBenefitOut])
+def list_rnr_benefits(
+    rnr_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+):
+    """The itemised breakdown underneath one household's overall R&R status."""
+    _visible_rnr_record_or_404(db, user, rnr_id)
+    benefits = (
+        db.query(RnrBenefit)
+        .filter(RnrBenefit.rnr_record_id == rnr_id)
+        .order_by(RnrBenefit.id)
+        .all()
+    )
+    return benefits
+
+
+@rnr_router.post("/{rnr_id}/benefits", response_model=RnrBenefitOut, status_code=status.HTTP_201_CREATED)
+def create_rnr_benefit(
+    rnr_id: int,
+    payload: RnrBenefitCreate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(*RNR_WRITERS)),
+):
+    """Add a promised benefit to a household's entitlement, to be tracked
+    to delivery on its own."""
+    _visible_rnr_record_or_404(db, user, rnr_id)
+
+    benefit = RnrBenefit(
+        rnr_record_id=rnr_id,
+        category=payload.category,
+        description=payload.description,
+        responsible_department=payload.responsible_department,
+        approved_on=payload.approved_on,
+        expected_on=payload.expected_on,
+        delivery_status=BenefitDeliveryStatus.PENDING,
+        updated_on=date.today(),
+    )
+    db.add(benefit)
+    db.flush()
+    audit.record(
+        db,
+        user,
+        action="rnr_benefit.create",
+        entity_type="rnr_benefit",
+        entity_id=benefit.id,
+        detail=f"rnr_record_id={rnr_id} category={payload.category.value}",
+    )
+    db.commit()
+    db.refresh(benefit)
+    return benefit
+
+
+@rnr_router.patch("/benefits/{benefit_id}", response_model=RnrBenefitOut)
+def update_rnr_benefit(
+    benefit_id: int,
+    payload: RnrBenefitUpdate,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(*RNR_WRITERS)),
+):
+    """Move one benefit along — approve it, mark it delivered, or flag a
+    problem with it — independently of the rest of the household's R&R."""
+    benefit = db.get(RnrBenefit, benefit_id)
+    if benefit is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Benefit not found")
+    record = _visible_rnr_record_or_404(db, user, benefit.rnr_record_id)
+
+    fields = payload.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No fields to update")
+
+    new_status = fields.get("delivery_status", benefit.delivery_status)
+    if new_status in BENEFIT_NOTE_REQUIRED_STATUSES and not fields.get("note", benefit.note):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="A note is required when marking a benefit failed or needing review",
+        )
+
+    evidence_document_id = fields.get("evidence_document_id")
+    if evidence_document_id is not None:
+        document = db.get(Document, evidence_document_id)
+        if document is None or document.case_id != record.case_id:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Evidence document not found on this case")
+
+    for key, value in fields.items():
+        setattr(benefit, key, value)
+    benefit.updated_on = date.today()
+
+    audit.record(
+        db,
+        user,
+        action="rnr_benefit.update",
+        entity_type="rnr_benefit",
+        entity_id=benefit.id,
+        detail=f"delivery_status={benefit.delivery_status.value}",
+    )
+    db.commit()
+    db.refresh(benefit)
+    return benefit
 
 
 @router.post("", response_model=AffectedPersonOut, status_code=status.HTTP_201_CREATED)
