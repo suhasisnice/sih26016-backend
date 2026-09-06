@@ -165,6 +165,42 @@ class CaseTimelineOut(BaseModel):
     basis: str | None
 
 
+class AttentionCaseOut(BaseModel):
+    """One row of "Cases Requiring Attention" — a case, not a finding.
+    Several rules can fire on the same case (stalled AND an unanswered
+    objection); this collapses them to the worst one so a Collector sees
+    one row per case to act on, not one row per thing wrong with it.
+    """
+
+    case_id: int
+    case_number: str
+    title: str
+    project_name: str
+    village_name: str
+    district_name: str
+    survey_numbers: list[str]
+    stage: Stage
+    # Whoever most recently moved this case, from its own stage history —
+    # there is no separate "assigned officer" column on Case, so this is
+    # the closest honest answer to "who is this case sitting with".
+    responsible_officer_name: str | None
+    stage_due_on: date | None
+    days_remaining: int | None
+    timeline_status: TimelineStatus
+    priority: AlertSeverity
+    reason: str
+    open_alert_count: int
+    affected_family_count: int
+    open_objection_count: int
+    compensation_pending_count: int
+    rnr_pending_count: int
+
+
+class AttentionList(BaseModel):
+    items: list[AttentionCaseOut]
+    total: int
+
+
 class RunRulesResult(BaseModel):
     cases_evaluated: int
     alerts_generated: int

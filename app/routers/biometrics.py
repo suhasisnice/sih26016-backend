@@ -25,19 +25,23 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app.core.enums import BiometricKind
-from app.core.security import create_access_token
+from app.core.security import STEPUP_TOKEN_EXPIRE_MINUTES, create_access_token, create_stepup_token
 from app.dependencies import get_current_user, get_db
-from app.models import BiometricCredential, FingerprintChallenge, KioskAgent, User
+from app.models import BiometricCredential, FingerprintChallenge, KioskAgent, StepUpChallenge, User
 from app.schemas.auth import LoginResponse
 from app.schemas.biometrics import (
     BiometricEnrollResponse,
     BiometricStatus,
     FaceEnrollRequest,
     FaceLoginRequest,
+    FaceStepUpRequest,
     FingerprintChallengeRequest,
     FingerprintChallengeResponse,
     FingerprintEnrollRequest,
     FingerprintLoginRequest,
+    FingerprintStepUpReportRequest,
+    FingerprintStepUpStartResponse,
+    StepUpResponse,
 )
 from app.services import audit, face, kiosk_auth, ratelimit
 
@@ -310,3 +314,113 @@ def fingerprint_login(
 
     ratelimit.clear(request)
     return _issue_login(db, user, action="auth.login_fingerprint")
+
+
+# ------------------------------------------------------------- step-up ----
+#
+# A fresh re-confirmation of an ALREADY signed-in officer's identity,
+# before one specific high-impact action — never a login. See
+# app.dependencies.verify_stepup for how the resulting token is checked at
+# the action itself (POST /cases/{id}/hold, or advancing into a
+# consequential stage). No rate limiter shared with login: an officer
+# retrying their own already-authenticated capture a few times is not a
+# credential-guessing surface the way an anonymous login attempt is.
+
+STEPUP_CHALLENGE_TTL_SECONDS = 60
+
+
+@router.post("/face/stepup", response_model=StepUpResponse)
+def face_stepup(
+    payload: FaceStepUpRequest,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    credential = _active_credential(db, user.id, BiometricKind.FACE)
+    if credential is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "No face is enrolled on this account. Enrol one from Security first.",
+        )
+
+    try:
+        image_bytes = base64.b64decode(payload.image_base64, validate=True)
+        attempt_embedding = face.extract_embedding(image_bytes)
+    except (ValueError, binascii.Error, face.FaceCaptureError) as exc:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, str(exc)) from exc
+
+    matched, _dist = face.matches(face.deserialise(credential.template), attempt_embedding)
+    if not matched:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Face not recognised. Try again.")
+
+    audit.record(db, user, action="stepup.face", entity_type="user", entity_id=user.id)
+    db.commit()
+    return StepUpResponse(
+        stepup_token=create_stepup_token(user.id),
+        expires_in_seconds=STEPUP_TOKEN_EXPIRE_MINUTES * 60,
+    )
+
+
+@router.post("/fingerprint/stepup/start", response_model=FingerprintStepUpStartResponse)
+def fingerprint_stepup_start(
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Handed straight to the browser, not fetched by a kiosk — unlike the
+    login challenge above, this caller already knows exactly who is
+    asking."""
+    credential = _active_credential(db, user.id, BiometricKind.FINGERPRINT)
+    if credential is None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "No fingerprint is enrolled on this account. Enrol one from Security first.",
+        )
+
+    challenge = StepUpChallenge(
+        user_id=user.id,
+        nonce=secrets.token_urlsafe(32),
+        expires_at=datetime.now(timezone.utc) + timedelta(seconds=STEPUP_CHALLENGE_TTL_SECONDS),
+    )
+    db.add(challenge)
+    db.commit()
+
+    return FingerprintStepUpStartResponse(
+        nonce=challenge.nonce,
+        template_base64=credential.template,
+        expires_in_seconds=STEPUP_CHALLENGE_TTL_SECONDS,
+    )
+
+
+@router.post("/fingerprint/stepup/report", response_model=StepUpResponse)
+def fingerprint_stepup_report(
+    payload: FingerprintStepUpReportRequest,
+    kiosk: KioskAgent = Depends(get_kiosk_agent),
+    db: Session = Depends(get_db),
+):
+    challenge = (
+        db.query(StepUpChallenge).filter(StepUpChallenge.nonce == payload.nonce).first()
+    )
+    generic_failure = HTTPException(status.HTTP_401_UNAUTHORIZED, "Fingerprint not recognised.")
+
+    if challenge is None or challenge.consumed_at is not None:
+        raise generic_failure
+    # Consumed before the score is even checked, same replay-prevention
+    # reasoning as the login challenge above.
+    challenge.consumed_at = datetime.now(timezone.utc)
+    challenge.kiosk_agent_id = kiosk.id
+    db.commit()
+
+    if datetime.now(timezone.utc) > challenge.expires_at:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "That confirmation timed out. Try again.")
+    if payload.score < MIN_FINGERPRINT_MATCH_SCORE:
+        raise generic_failure
+
+    user = db.get(User, challenge.user_id)
+    if user is None or not user.is_active:
+        raise generic_failure
+
+    audit.record(db, user, action="stepup.fingerprint", entity_type="user", entity_id=user.id)
+    db.commit()
+    return StepUpResponse(
+        stepup_token=create_stepup_token(user.id),
+        expires_in_seconds=STEPUP_TOKEN_EXPIRE_MINUTES * 60,
+    )

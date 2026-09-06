@@ -39,12 +39,13 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.core.enums import DocType, Role
+from app.core.enums import DocType, DocumentVerificationStatus, Role
 from app.dependencies import get_current_user, get_db, require_role, scope_cases_to_user
 from app.models import Case, Document, RequiredDocument, User
 from app.schemas.document import (
     DocumentList,
     DocumentOut,
+    DocumentVerifyRequest,
     DocumentVersionHistory,
     MissingDocuments,
 )
@@ -59,6 +60,12 @@ DOCUMENT_UPLOADERS = (
     Role.FIELD_OFFICER,
     Role.RNR_OFFICER,
 )
+
+# Reviewing a document is a narrower act than filing one — a field officer
+# uploads a survey report, but does not get to mark their own submission
+# verified. Matches CASE_WRITERS: whoever can move a case's stage is who
+# this system already trusts to decide a document is in order.
+DOCUMENT_VERIFIERS = (Role.ADMIN, Role.DISTRICT_OFFICER, Role.SLAO)
 
 # An allowlist, not a blocklist. Anything not named here is refused, so a
 # dangerous type cannot slip in simply because nobody thought to ban it.
@@ -271,6 +278,11 @@ async def upload_document(
         supersedes_id=previous.id if previous else None,
         is_current=True,
         sha256=digest.hexdigest(),
+        # A fresh upload is unreviewed even when it replaces a verified
+        # one — the previous review was of different bytes, and carrying
+        # a VERIFIED status onto a file nobody has looked at would be a
+        # false signal to whoever reads the document list next.
+        verification_status=DocumentVerificationStatus.PENDING,
     )
     db.add(document)
     db.flush()
@@ -327,3 +339,46 @@ def download_document(
     db.commit()
 
     return FileResponse(path, media_type=document.content_type, filename=document.filename)
+
+
+@router.post("/{document_id}/verify", response_model=DocumentOut)
+def verify_document(
+    document_id: int,
+    payload: DocumentVerifyRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_role(*DOCUMENT_VERIFIERS)),
+):
+    """VERIFY, REJECT, or SEND FOR CORRECTION — anything but a plain
+    VERIFIED requires a remark, checked here rather than only on the
+    frontend, the same rule every other review action in this system
+    enforces server-side."""
+    document = db.get(Document, document_id)
+    if document is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Document not found")
+    _case_or_404(db, user, document.case_id)
+
+    if payload.status != DocumentVerificationStatus.VERIFIED and not (
+        payload.note and payload.note.strip()
+    ):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            "A remark is required unless you are marking this document verified.",
+        )
+
+    document.verification_status = payload.status
+    document.verification_note = payload.note
+    document.verified_by_user_id = user.id
+    document.verified_on = date.today()
+
+    audit.record(
+        db,
+        user,
+        action="document.verify",
+        entity_type="document",
+        entity_id=document.id,
+        detail=f"{document.doc_type.value} v{document.version} -> {payload.status.value}"
+        + (f": {payload.note}" if payload.note else ""),
+    )
+    db.commit()
+    db.refresh(document)
+    return DocumentOut.model_validate(document)

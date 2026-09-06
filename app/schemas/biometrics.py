@@ -82,6 +82,44 @@ class FingerprintLoginRequest(BaseModel):
     score: int = Field(ge=0, le=100_000)
 
 
+class FaceStepUpRequest(BaseModel):
+    """Re-confirming the signed-in officer's own face before one
+    high-impact action — never a login, so there is no username field:
+    whose face this must match is already known from the bearer token."""
+
+    image_base64: str = Field(min_length=1)
+
+
+class StepUpResponse(BaseModel):
+    """Handed to whichever high-impact endpoint the officer is about to
+    call, as the X-Stepup-Token header — see
+    app.dependencies.verify_stepup. Never reusable for a second action past
+    expires_in_seconds, and never a bearer token: typ:"stepup" keeps it out
+    of get_current_user entirely."""
+
+    stepup_token: str
+    expires_in_seconds: int
+
+
+class FingerprintStepUpStartResponse(BaseModel):
+    """Handed directly to the browser, not to a kiosk — unlike
+    FingerprintChallengeResponse, the caller here is the already-signed-in
+    officer's own session, which already knows who it is."""
+
+    nonce: str
+    template_base64: str
+    expires_in_seconds: int
+
+
+class FingerprintStepUpReportRequest(BaseModel):
+    """What the kiosk agent reports after matching locally — same
+    score-not-boolean discipline as FingerprintLoginRequest, for the same
+    reason."""
+
+    nonce: str
+    score: int = Field(ge=0, le=100_000)
+
+
 class KioskAgentCreate(BaseModel):
     label: str = Field(min_length=1, max_length=120)
     district_id: int | None = None
@@ -117,13 +155,17 @@ __all__ = [
     "BiometricStatus",
     "FaceEnrollRequest",
     "FaceLoginRequest",
+    "FaceStepUpRequest",
     "FingerprintChallengeRequest",
     "FingerprintChallengeResponse",
     "FingerprintEnrollRequest",
     "FingerprintLoginRequest",
+    "FingerprintStepUpReportRequest",
+    "FingerprintStepUpStartResponse",
     "KioskAgentCreate",
     "KioskAgentIssued",
     "KioskAgentList",
     "KioskAgentOut",
     "LoginResponse",
+    "StepUpResponse",
 ]
