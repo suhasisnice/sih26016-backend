@@ -82,8 +82,15 @@ TRANSITIONS: dict[ProposalStatus, dict[ProposalStatus, tuple[Role, ...]]] = {
 # Derived from status rather than stored, so the two cannot disagree.
 OWNER_BY_STATUS = {
     ProposalStatus.DRAFT: "Requiring body",
-    ProposalStatus.SUBMITTED: "State — awaiting scrutiny",
-    ProposalStatus.UNDER_SCRUTINY: "Ministry — awaiting sanction",
+    # Either tier in TRANSITIONS[SUBMITTED][UNDER_SCRUTINY] may pick this up —
+    # a district-only demo runs entirely on the DC, so this cannot name state
+    # alone without misleading the district officer looking at their own
+    # proposal queue.
+    ProposalStatus.SUBMITTED: "District or state — awaiting scrutiny",
+    # Same reasoning for TRANSITIONS[UNDER_SCRUTINY][APPROVED]: District
+    # Officer sanctions alongside Ministry Officer (see TRANSITIONS' own
+    # comment above for why).
+    ProposalStatus.UNDER_SCRUTINY: "District or ministry — awaiting sanction",
     ProposalStatus.RETURNED: "Requiring body — revision required",
     ProposalStatus.APPROVED: "Sanctioned",
     ProposalStatus.REJECTED: "Closed",
