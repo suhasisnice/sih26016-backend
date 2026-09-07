@@ -5,6 +5,7 @@ is separate from just registering a parcel (Parcel/ParcelCreate, in
 app.routers.parcels) or filing a document (app.routers.documents).
 """
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,6 +28,7 @@ from app.models import Case, Parcel, SurveyPhoto, SurveyTask, User
 from app.schemas.common import Message
 from app.schemas.survey import (
     AssignableOfficerOut,
+    LatLng,
     SurveyPhotoOut,
     SurveyReviewRequest,
     SurveyTaskCreate,
@@ -86,11 +88,28 @@ def _task_out(db: Session, task: SurveyTask) -> SurveyTaskOut:
     reviewed_by = db.get(User, task.reviewed_by_user_id) if task.reviewed_by_user_id else None
 
     point_count = 0
+    boundary_points: list[LatLng] | None = None
     if task.boundary_geom is not None:
         # The stored ring repeats its first point to close itself; that
         # point is not a corner the officer walked, so it is not counted.
         n_points = db.query(func.ST_NPoints(SurveyTask.boundary_geom)).filter(SurveyTask.id == task.id).scalar()
         point_count = max((n_points or 1) - 1, 0)
+        boundary_geojson = (
+            db.query(func.ST_AsGeoJSON(SurveyTask.boundary_geom)).filter(SurveyTask.id == task.id).scalar()
+        )
+        if boundary_geojson:
+            ring = json.loads(boundary_geojson)["coordinates"][0]
+            boundary_points = [LatLng(latitude=lat, longitude=lon) for lon, lat in ring[:-1]]
+
+    location: LatLng | None = None
+    if task.location_geom is not None:
+        row = (
+            db.query(func.ST_X(SurveyTask.location_geom), func.ST_Y(SurveyTask.location_geom))
+            .filter(SurveyTask.id == task.id)
+            .first()
+        )
+        if row:
+            location = LatLng(longitude=row[0], latitude=row[1])
 
     photos = (
         db.query(SurveyPhoto)
@@ -118,7 +137,9 @@ def _task_out(db: Session, task: SurveyTask) -> SurveyTaskOut:
         started_at=task.started_at,
         measured_area_ha=task.measured_area_ha,
         boundary_point_count=point_count,
+        boundary_points=boundary_points,
         has_location=task.location_geom is not None,
+        location=location,
         remarks=task.remarks,
         land_use=task.land_use,
         boundary_condition=task.boundary_condition,

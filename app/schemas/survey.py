@@ -5,7 +5,7 @@ just another parcel field.
 
 from datetime import date, datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.core.enums import BoundaryCondition, LandUseType, SurveyPhotoCategory, SurveyTaskStatus
 
@@ -13,6 +13,15 @@ from app.core.enums import BoundaryCondition, LandUseType, SurveyPhotoCategory, 
 class LatLng(BaseModel):
     latitude: float = Field(ge=-90, le=90)
     longitude: float = Field(ge=-180, le=180)
+
+    @model_validator(mode="after")
+    def _not_null_island(self) -> "LatLng":
+        # A phone with no fix reports (0, 0) — mid-Atlantic, not a real
+        # reading. See ParcelCreate's identical check in app.schemas.geo for
+        # why this is rejected outright rather than trusted.
+        if self.latitude == 0 and self.longitude == 0:
+            raise ValueError("(0, 0) is not a real GPS fix — check the device's location")
+        return self
 
 
 class SurveyTaskCreate(BaseModel):
@@ -87,10 +96,14 @@ class SurveyTaskOut(BaseModel):
     created_at: datetime
     started_at: datetime | None
     measured_area_ha: float | None
-    # Corner count rather than the raw geometry — the detail page needs "4
-    # corners recorded" to render its own map, not a WKT string to parse.
+    # Corner count for the lightweight "4 corners recorded" display; the
+    # actual points below are for something that wants to draw them (the
+    # map's Survey Locations layer) — plain {latitude, longitude} pairs, not
+    # a WKT string to parse.
     boundary_point_count: int
+    boundary_points: list[LatLng] | None
     has_location: bool
+    location: LatLng | None
     remarks: str | None
 
     land_use: LandUseType | None
