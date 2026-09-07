@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.core.enums import DocType, DocumentVerificationStatus, Role
 from app.dependencies import get_current_user, get_db, require_role, scope_cases_to_user
-from app.models import Case, Document, RequiredDocument, User
+from app.models import Case, Document, RequiredDocument, SurveyTask, User
 from app.schemas.document import (
     DocumentList,
     DocumentOut,
@@ -78,6 +78,9 @@ def _case_or_404(db: Session, user: User, case_id: int) -> Case:
 @router.get("", response_model=DocumentList)
 def list_documents(
     case_id: int = Query(description="Case whose documents to list"),
+    survey_task_id: int | None = Query(
+        default=None, description="Restrict to documents filed against one survey task"
+    ),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     include_superseded: bool = Query(
@@ -94,6 +97,8 @@ def list_documents(
     _case_or_404(db, user, case_id)
 
     query = db.query(Document).filter(Document.case_id == case_id)
+    if survey_task_id is not None:
+        query = query.filter(Document.survey_task_id == survey_task_id)
     if not include_superseded:
         query = query.filter(Document.is_current.is_(True))
 
@@ -180,11 +185,26 @@ def missing_documents(
 async def upload_document(
     case_id: int = Form(...),
     doc_type: DocType = Form(...),
+    survey_task_id: int | None = Form(default=None),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     user: User = Depends(require_role(*DOCUMENT_UPLOADERS)),
 ):
     _case_or_404(db, user, case_id)
+
+    if survey_task_id is not None:
+        task = db.get(SurveyTask, survey_task_id)
+        if task is None or task.case_id != case_id:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, detail="Survey task not found on this case"
+            )
+        # A field officer may only attach evidence to their own fieldwork;
+        # a reviewer (SLAO/District Officer/Admin) can file on any task
+        # they can already see, same reach documents.py's other writes have.
+        if user.role == Role.FIELD_OFFICER and task.assigned_to_user_id != user.id:
+            raise HTTPException(
+                status.HTTP_403_FORBIDDEN, detail="This survey is not assigned to you"
+            )
 
     saved = await save_upload_file(file, ALLOWED_CONTENT_TYPES)
 
@@ -207,6 +227,7 @@ async def upload_document(
 
     document = Document(
         case_id=case_id,
+        survey_task_id=survey_task_id,
         doc_type=doc_type,
         # Path(...).name strips any directory part the client sent.
         filename=Path(file.filename or "upload").name[:255],
@@ -236,6 +257,7 @@ async def upload_document(
         detail=(
             f"{doc_type.value} v{next_version} on case {case_id} "
             f"({document.size_bytes} bytes, sha256={document.sha256[:12]}…)"
+            f"({saved.size_bytes} bytes, sha256={document.sha256[:12]}…)"
             + (f" superseding #{previous.id}" if previous else "")
         ),
     )

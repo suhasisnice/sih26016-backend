@@ -8,12 +8,20 @@ without translating it first.
 import re
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from app.core.enums import ParcelStatus
+from app.core.enums import ParcelStatus, Stage
 from app.schemas.provenance import ProvenanceOut
 
 ULPIN_RE = re.compile(r"^[A-Z0-9]{14}$")
+
+
+def _reject_null_island(latitude: float | None, longitude: float | None) -> None:
+    """A phone with no fix reports (0, 0) — the middle of the Atlantic, not
+    a real reading. Rejected explicitly rather than left to look like a
+    valid coordinate that happens to plot a parcel off the coast of Ghana."""
+    if latitude == 0 and longitude == 0:
+        raise ValueError("(0, 0) is not a real GPS fix — check the device's location")
 
 
 class ParcelOut(BaseModel):
@@ -66,6 +74,15 @@ class ParcelProperties(BaseModel):
     id: int
     case_id: int
     case_number: str
+    # The case's current legal stage — shown in the map's detail panel so a
+    # selected parcel says where its acquisition actually stands, not just
+    # what it's called.
+    case_stage: Stage
+    project_id: int
+    project_name: str
+    district_id: int
+    district_name: str
+    village_name: str
     survey_number: str
     ulpin: str | None = None
     area_ha: float
@@ -140,6 +157,11 @@ class ParcelCreate(BaseModel):
             raise ValueError("ULPIN must be 14 alphanumeric characters")
         return value
 
+    @model_validator(mode="after")
+    def _not_null_island(self) -> "ParcelCreate":
+        _reject_null_island(self.latitude, self.longitude)
+        return self
+
 
 class ParcelUpdate(BaseModel):
     """Correct a parcel, or move it along.
@@ -165,3 +187,12 @@ class ParcelUpdate(BaseModel):
         if not ULPIN_RE.match(value):
             raise ValueError("ULPIN must be 14 alphanumeric characters")
         return value
+
+    @model_validator(mode="after")
+    def _not_null_island(self) -> "ParcelUpdate":
+        # Only meaningful when both are actually being set — update_parcel's
+        # own "send both or neither" rule means a lone None here is a field
+        # simply not being touched, not a coordinate of (0, None).
+        if self.latitude is not None and self.longitude is not None:
+            _reject_null_island(self.latitude, self.longitude)
+        return self

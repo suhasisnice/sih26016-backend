@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.enums import MutationStatus, ParcelStatus, Role
 from app.dependencies import get_current_user, get_db, require_role, scope_cases_to_user
 from app.integrations.providers import configured_key, get_provider
-from app.models import Case, MutationRequest, Parcel, Person, User
+from app.models import Case, District, MutationRequest, Parcel, Person, Project, User, Village
 from app.schemas import (
     ParcelFeature,
     ParcelFeatureCollection,
@@ -55,6 +55,70 @@ def _geometry(boundary_geojson: str | None, lon: float, lat: float):
     return PointGeometry(coordinates=[lon, lat])
 
 
+# The columns every map-facing query needs, in one place — /bbox and
+# /search both want the same enriched shape (project/district/village name,
+# case stage) for the same reason: a selected parcel's detail panel has to
+# say where the acquisition stands without a second round trip.
+_PROPERTY_COLUMNS = (
+    Parcel,
+    Case.case_number,
+    Case.stage,
+    Project.id,
+    Project.name,
+    District.id,
+    District.name,
+    Village.name,
+    Person.name,
+    ST_X(Parcel.geom),
+    ST_Y(Parcel.geom),
+)
+
+
+def _with_property_joins(query):
+    return (
+        query.join(Case, Parcel.case_id == Case.id)
+        .join(Project, Case.project_id == Project.id)
+        .join(District, Case.district_id == District.id)
+        .join(Village, Case.village_id == Village.id)
+        .join(Person, Parcel.owner_id == Person.id)
+    )
+
+
+def _parcel_properties(
+    parcel: Parcel,
+    case_number: str,
+    case_stage,
+    project_id: int,
+    project_name: str,
+    district_id: int,
+    district_name: str,
+    village_name: str,
+    owner_name: str,
+    lon: float,
+    lat: float,
+) -> ParcelProperties:
+    return ParcelProperties(
+        id=parcel.id,
+        case_id=parcel.case_id,
+        case_number=case_number,
+        case_stage=case_stage,
+        project_id=project_id,
+        project_name=project_name,
+        district_id=district_id,
+        district_name=district_name,
+        village_name=village_name,
+        survey_number=parcel.survey_number,
+        ulpin=parcel.ulpin,
+        area_ha=parcel.area_ha,
+        status=parcel.status,
+        owner_name=owner_name,
+        longitude=float(lon),
+        latitude=float(lat),
+        has_boundary=parcel.boundary is not None,
+        provenance=provenance.out(parcel),
+    )
+
+
 @router.get("/bbox", response_model=ParcelFeatureCollection)
 def parcels_in_bbox(
     db: Session = Depends(get_db),
@@ -68,6 +132,8 @@ def parcels_in_bbox(
         default=None,
         description="Only this case's parcels — what 'show me this project's plots' asks for.",
     ),
+    district_id: int | None = Query(default=None, description="Only this district's parcels"),
+    project_id: int | None = Query(default=None, description="Only this project's parcels"),
 ):
     """Parcels inside the map's current viewport, as GeoJSON.
 
@@ -90,19 +156,11 @@ def parcels_in_bbox(
         )
 
     envelope = ST_MakeEnvelope(min_lon, min_lat, max_lon, max_lat, 4326)
-    query = (
-        db.query(
-            Parcel,
-            Case.case_number,
-            Person.name,
-            ST_X(Parcel.geom),
-            ST_Y(Parcel.geom),
-            ST_AsGeoJSON(Parcel.boundary),
-        )
-        .join(Case, Parcel.case_id == Case.id)
-        .join(Person, Parcel.owner_id == Person.id)
-        .filter(Parcel.geom.ST_Intersects(envelope))
-        .filter(Parcel.case_id.in_(_visible_case_ids(db, user)))
+    query = _with_property_joins(
+        db.query(*_PROPERTY_COLUMNS, ST_AsGeoJSON(Parcel.boundary))
+    ).filter(
+        Parcel.geom.ST_Intersects(envelope),
+        Parcel.case_id.in_(_visible_case_ids(db, user)),
     )
     if parcel_status is not None:
         query = query.filter(Parcel.status == parcel_status)
@@ -111,6 +169,10 @@ def parcels_in_bbox(
         # can only narrow the visible set above, so an unentitled case_id
         # returns nothing rather than leaking that it exists.
         query = query.filter(Parcel.case_id == case_id)
+    if district_id is not None:
+        query = query.filter(Case.district_id == district_id)
+    if project_id is not None:
+        query = query.filter(Case.project_id == project_id)
 
     # Fetch one extra to detect truncation without a second count query.
     rows = query.order_by(Parcel.id).limit(BBOX_FEATURE_LIMIT + 1).all()
@@ -120,63 +182,62 @@ def parcels_in_bbox(
     features = [
         ParcelFeature(
             geometry=_geometry(boundary, float(lon), float(lat)),
-            properties=ParcelProperties(
-                id=parcel.id,
-                case_id=parcel.case_id,
-                case_number=case_number,
-                survey_number=parcel.survey_number,
-                ulpin=parcel.ulpin,
-                area_ha=parcel.area_ha,
-                status=parcel.status,
-                owner_name=owner_name,
-                longitude=float(lon),
-                latitude=float(lat),
-                has_boundary=boundary is not None,
-                provenance=provenance.out(parcel),
+            properties=_parcel_properties(
+                parcel, case_number, case_stage, proj_id, proj_name,
+                dist_id, dist_name, village_name, owner_name, lon, lat,
             ),
         )
-        for parcel, case_number, owner_name, lon, lat, boundary in rows
+        for (
+            parcel, case_number, case_stage, proj_id, proj_name,
+            dist_id, dist_name, village_name, owner_name, lon, lat, boundary,
+        ) in rows
     ]
     return ParcelFeatureCollection(features=features, truncated=truncated)
 
 
-@router.get("/search", response_model=list[ParcelOut])
+@router.get("/search", response_model=list[ParcelProperties])
 def search_parcels(
-    survey_number: str = Query(min_length=1, max_length=20, description="Full or partial survey number"),
+    q: str = Query(min_length=1, max_length=40, description="Survey number, ULPIN, or case number"),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
     limit: int = Query(default=50, ge=1, le=200),
 ):
-    """Find parcels by survey number so the map can jump to one.
+    """Find parcels by survey number, ULPIN, or case number, so the map's
+    search box can jump to one.
 
-    Matched with a bound ilike parameter — the wildcards are ours, the
-    value stays parameterised, so % or _ in the input cannot restructure
-    the query.
+    All three are matched with the same bound ilike parameter, ORed
+    together — a single search box, not three separate fields, so one query
+    tries all three identifiers a user might have on hand rather than
+    guessing which one they typed. The wildcards are ours, the value stays
+    parameterised, so % or _ in the input cannot restructure the query.
+
+    Returns the same enriched shape /bbox does (project/district/village,
+    case stage, provenance) rather than the bare ParcelOut the old
+    survey-number-only version returned, so a search-result row and a
+    clicked map feature carry identical fields for the detail panel.
     """
+    pattern = f"%{q}%"
     rows = (
-        db.query(Parcel, Person.name, ST_X(Parcel.geom), ST_Y(Parcel.geom))
-        .join(Person, Parcel.owner_id == Person.id)
-        .filter(Parcel.survey_number.ilike(f"%{survey_number}%"))
+        _with_property_joins(db.query(*_PROPERTY_COLUMNS))
+        .filter(
+            Parcel.survey_number.ilike(pattern)
+            | Parcel.ulpin.ilike(pattern)
+            | Case.case_number.ilike(pattern)
+        )
         .filter(Parcel.case_id.in_(_visible_case_ids(db, user)))
         .order_by(Parcel.survey_number)
         .limit(limit)
         .all()
     )
     return [
-        ParcelOut(
-            id=parcel.id,
-            case_id=parcel.case_id,
-            survey_number=parcel.survey_number,
-            ulpin=parcel.ulpin,
-            area_ha=parcel.area_ha,
-            status=parcel.status,
-            owner_id=parcel.owner_id,
-            owner_name=owner_name,
-            longitude=float(lon),
-            latitude=float(lat),
-            provenance=provenance.out(parcel),
+        _parcel_properties(
+            parcel, case_number, case_stage, proj_id, proj_name,
+            dist_id, dist_name, village_name, owner_name, lon, lat,
         )
-        for parcel, owner_name, lon, lat in rows
+        for (
+            parcel, case_number, case_stage, proj_id, proj_name,
+            dist_id, dist_name, village_name, owner_name, lon, lat,
+        ) in rows
     ]
 
 
