@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from app.core.enums import NotificationChannel, NotificationLogStatus
 from app.integrations import messaging
-from app.models import Case, NotificationLog, NotificationSubscription, Parcel, Project
+from app.models import NotificationLog, NotificationSubscription, Parcel, Project
 
 # The three events this feature knows about — see the module docstring in
 # app.models.tables.NotificationLog for why this is plain text, not an
