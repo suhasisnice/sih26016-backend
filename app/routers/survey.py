@@ -369,8 +369,14 @@ def download_survey_photo(
     if photo is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Photo not found")
 
-    path = Path(settings.upload_dir) / photo.stored_name
-    if not path.exists():
+    # Resolved and checked to sit inside the upload directory, matching
+    # documents.download_document. Not reachable today — stored_name is a
+    # uuid this server generated, never anything a caller supplied — but the
+    # two download paths reading the same directory should not disagree
+    # about how carefully they read it.
+    upload_dir = Path(settings.upload_dir).resolve()
+    path = (upload_dir / photo.stored_name).resolve()
+    if path.parent != upload_dir or not path.is_file():
         raise HTTPException(status.HTTP_404_NOT_FOUND, detail="Photo file not found")
     return FileResponse(path, media_type=photo.content_type)
 
@@ -427,12 +433,6 @@ def submit_survey_task(
             detail="Record a measured area, a boundary, or at least one photo before submitting",
         )
 
-    # The one place in the whole system that ever writes Parcel.boundary —
-    # every other parcel stays a bare GPS point until a survey walks it.
-    if task.boundary_geom is not None and task.parcel_id is not None:
-        parcel = db.get(Parcel, task.parcel_id)
-        parcel.boundary = task.boundary_geom
-
     task.status = SurveyTaskStatus.SUBMITTED
     task.submitted_at = datetime.now(timezone.utc)
     audit.record(db, user, action="survey_task.submit", entity_type="survey_task", entity_id=task.id)
@@ -454,13 +454,37 @@ def approve_survey_task(
             status.HTTP_400_BAD_REQUEST, detail=f"Cannot approve a task that is {task.status.value}"
         )
 
+    # The one place in the whole system that ever writes Parcel.boundary —
+    # every other parcel stays a bare GPS point until an APPROVED survey has
+    # walked it.
+    #
+    # On approval, not on submission. Written at submit, an outline the
+    # reviewer had not seen was already the parcel's official shape, and a
+    # survey subsequently RETURNED for correction left its rejected boundary
+    # on the map with nothing to put it back. It is the same rule
+    # documents.py states for verification status: an artefact nobody has
+    # reviewed must not carry the authority of one that has been.
+    applied_boundary = False
+    if task.boundary_geom is not None and task.parcel_id is not None:
+        parcel = db.get(Parcel, task.parcel_id)
+        if parcel is not None:
+            parcel.boundary = task.boundary_geom
+            applied_boundary = True
+
     task.status = SurveyTaskStatus.APPROVED
     task.reviewed_by_user_id = user.id
     task.reviewed_at = datetime.now(timezone.utc)
     task.review_note = payload.review_note.strip() if payload.review_note else None
     audit.record(
         db, user, action="survey_task.approve", entity_type="survey_task", entity_id=task.id,
-        detail=task.review_note or "",
+        detail=(
+            (task.review_note or "")
+            + (
+                f" [boundary applied to parcel {task.parcel_id}]"
+                if applied_boundary
+                else ""
+            )
+        ).strip(),
     )
     db.commit()
     db.refresh(task)

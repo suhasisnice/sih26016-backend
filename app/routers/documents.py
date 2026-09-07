@@ -235,7 +235,7 @@ async def upload_document(
         entity_id=document.id,
         detail=(
             f"{doc_type.value} v{next_version} on case {case_id} "
-            f"({written} bytes, sha256={document.sha256[:12]}…)"
+            f"({document.size_bytes} bytes, sha256={document.sha256[:12]}…)"
             + (f" superseding #{previous.id}" if previous else "")
         ),
     )

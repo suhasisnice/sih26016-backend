@@ -16,6 +16,15 @@ RULE = "timeline_breach"
 def timeline_breach(cases: list[dict], as_of: date) -> list[dict]:
     alerts = []
     for case in cases:
+        # Same reasoning as case_stalled: a closed case has no next
+        # milestone to miss, and its final stage's deadline going by is not
+        # a breach of anything. Rules that describe an OUTCOME rather than
+        # momentum — an unpaid award, an unanswered objection, a missing
+        # fund deposit — deliberately keep firing on closed cases, because
+        # closing a case does not settle any of them.
+        if case["status"] == "closed":
+            continue
+
         due_on = case["stage_due_on"]
         if due_on is None or as_of <= due_on:
             continue
