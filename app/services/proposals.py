@@ -58,8 +58,15 @@ TRANSITIONS: dict[ProposalStatus, dict[ProposalStatus, tuple[Role, ...]]] = {
     ProposalStatus.UNDER_SCRUTINY: {
         ProposalStatus.APPROVED: (Role.MINISTRY_OFFICER, Role.DISTRICT_OFFICER, Role.ADMIN),
         ProposalStatus.REJECTED: (Role.MINISTRY_OFFICER, Role.ADMIN),
+        # District Officer is here for the same reason it is on APPROVED
+        # above: it is one of the tiers that takes a proposal UP for
+        # scrutiny, and a scrutineer who can only ever sanction is not
+        # scrutinising. Without this the district-only path had exactly one
+        # exit from scrutiny — approval — which is the opposite of what a
+        # review step is for.
         ProposalStatus.RETURNED: (
             Role.STATE_OFFICER,
+            Role.DISTRICT_OFFICER,
             Role.MINISTRY_OFFICER,
             Role.ADMIN,
         ),

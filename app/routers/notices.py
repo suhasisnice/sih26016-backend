@@ -50,15 +50,47 @@ from app.services import audit, credentials, landowner_notify, totp
 
 router = APIRouter(prefix="/notices", tags=["notices"])
 
-# The two stages the Act requires be published. A case at any other stage is
-# in progress, not on the record, and must not appear here.
-PUBLISHED_STAGES = (Stage.PRELIMINARY_NOTIFICATION, Stage.DECLARATION)
+# The two instruments the Act requires be published. Award and possession
+# notices are real published instruments too, but s.11 and s.19 are the two
+# this board exists for: they are the ones a citizen has a period to act
+# against.
+PUBLISHED_TYPES = (NoticeType.PRELIMINARY_NOTIFICATION, NoticeType.DECLARATION)
 
 
 class NoticeOut(BaseModel):
+    """One published instrument — not one case.
+
+    This board reads the statutory_notices register, which records that an
+    instrument was actually issued, on what date and under which gazette
+    number. It used to read the cases table instead, listing whichever cases
+    were SITTING at the notification or declaration stage, and that was
+    wrong in both directions at once:
+
+    - A notification vanished from the public record the moment its case
+      advanced. Publication under s.11 is a completed public act; it does
+      not stop having happened because the file moved on. The rest of this
+      system already knows that — see StatutoryNotice's own docstring, and
+      the /lookup route below, which has always read the register.
+    - A case that had reached the declaration stage internally, without the
+      declaration having been issued, was published here as though it had
+      been. That is the worse half: the board was announcing instruments
+      that did not exist.
+
+    One case can therefore appear twice, once per instrument, which is
+    correct — a notification and a declaration are two separate publications
+    with two separate dates, and the sixty-day objection window runs from
+    the first of them.
+    """
+
     case_number: str
     title: str
-    stage: Stage
+    notice_type: NoticeType
+    # The provision it was issued under, and the gazette it appeared in —
+    # the two things that make an entry here a citable public record rather
+    # than an announcement.
+    section_reference: str
+    gazette_number: str | None
+    issuing_authority: str
     published_on: date
     village_name: str
     district_name: str
@@ -66,6 +98,11 @@ class NoticeOut(BaseModel):
     requiring_body: str
     parcel_count: int
     total_area_ha: float
+    # The stage the case has since reached. A notice is a fact about a date
+    # in the past; this is the only field here that describes today, and it
+    # is what lets the board say "notified in March, now at award" instead
+    # of implying the case never moved.
+    current_stage: Stage
 
 
 class NoticeList(BaseModel):
@@ -114,56 +151,91 @@ class NoticeLookupResult(BaseModel):
 @router.get("", response_model=NoticeList)
 def list_notices(
     db: Session = Depends(get_db),
-    stage: Stage | None = Query(default=None, description="Restrict to one published stage"),
+    notice_type: NoticeType | None = Query(
+        default=None, description="Restrict to one published instrument"
+    ),
     district_id: int | None = Query(default=None),
     limit: int = Query(default=100, le=200),
 ):
-    stages = [stage] if stage in PUBLISHED_STAGES else list(PUBLISHED_STAGES)
+    """The register of published instruments, most recent first.
+
+    An award or possession notice passed as `notice_type` narrows to
+    nothing rather than being refused: those are real instruments, they are
+    simply not what this board publishes, and a 400 on a value the enum
+    accepts would be a stranger answer than an empty list.
+    """
+    if notice_type is not None and notice_type not in PUBLISHED_TYPES:
+        return NoticeList(items=[], total=0)
+    types = [notice_type] if notice_type is not None else list(PUBLISHED_TYPES)
 
     query = (
         db.query(
+            StatutoryNotice,
             Case,
             Village.name,
             District.name,
             Project.name,
             Project.requiring_body,
-            func.count(Parcel.id),
-            func.coalesce(func.sum(Parcel.area_ha), 0.0),
         )
+        .join(Case, StatutoryNotice.case_id == Case.id)
         .join(Village, Case.village_id == Village.id)
         .join(District, Case.district_id == District.id)
         .join(Project, Case.project_id == Project.id)
-        .outerjoin(Parcel, Parcel.case_id == Case.id)
-        .filter(Case.stage.in_(stages))
+        .filter(StatutoryNotice.notice_type.in_(types))
     )
 
     if district_id is not None:
         query = query.filter(Case.district_id == district_id)
 
     rows = (
-        query.group_by(Case.id, Village.name, District.name, Project.name, Project.requiring_body)
-        .order_by(Case.stage_changed_at.desc(), Case.id.desc())
+        query.order_by(StatutoryNotice.issued_on.desc(), StatutoryNotice.id.desc())
         .limit(limit)
         .all()
     )
+
+    # Parcel totals in one grouped query rather than folded into the join
+    # above: a case with three parcels would otherwise multiply its notice
+    # row by three, and the count would be of the fan-out rather than of
+    # the land.
+    case_ids = [case.id for _notice, case, *_ in rows]
+    totals: dict[int, tuple[int, float]] = {}
+    if case_ids:
+        totals = {
+            case_id: (count, round(float(area), 4))
+            for case_id, count, area in (
+                db.query(
+                    Parcel.case_id,
+                    func.count(Parcel.id),
+                    func.coalesce(func.sum(Parcel.area_ha), 0.0),
+                )
+                .filter(Parcel.case_id.in_(case_ids))
+                .group_by(Parcel.case_id)
+                .all()
+            )
+        }
 
     items = [
         NoticeOut(
             case_number=case.case_number,
             title=case.title,
-            stage=case.stage,
-            # The date the case entered the published stage is the date of
-            # publication. created_at would be when the file was opened,
-            # which is not what the sixty-day objection window runs from.
-            published_on=case.stage_changed_at,
+            notice_type=notice.notice_type,
+            section_reference=notice.section_reference,
+            gazette_number=notice.gazette_number,
+            issuing_authority=notice.issuing_authority,
+            # The date the instrument was issued, off the register itself.
+            # This used to be the case's stage_changed_at, which moved every
+            # time the case did — so the date a citizen's objection window
+            # runs from silently changed as the file progressed.
+            published_on=notice.issued_on,
             village_name=village_name,
             district_name=district_name,
             project_name=project_name,
             requiring_body=requiring_body,
-            parcel_count=parcel_count,
-            total_area_ha=round(float(total_area), 4),
+            parcel_count=totals.get(case.id, (0, 0.0))[0],
+            total_area_ha=totals.get(case.id, (0, 0.0))[1],
+            current_stage=case.stage,
         )
-        for case, village_name, district_name, project_name, requiring_body, parcel_count, total_area in rows
+        for notice, case, village_name, district_name, project_name, requiring_body in rows
     ]
 
     return NoticeList(items=items, total=len(items))

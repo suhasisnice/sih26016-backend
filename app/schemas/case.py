@@ -128,14 +128,20 @@ class CaseDetail(BaseModel):
 
 
 class CaseUpdate(BaseModel):
-    """Editable fields on a case. Deliberately not `stage`.
+    """Editable fields on a case. Deliberately neither `stage` nor `status`.
 
     The stage moves only through POST /cases/{id}/advance, which validates
     the transition against the Act and writes the stage history. Allowing it
     here would give a second, unvalidated way to move a case and leave the
     timeline with gaps.
+
+    The status is the same argument one level down. It moves through
+    POST /cases/{id}/hold and /resume, which demand a written reason and —
+    for a hold — a fresh biometric check. A PATCH that also set the status
+    would let a case be held, resumed or closed with neither, and the
+    reason is the whole point: "stalled" with nothing recorded against it
+    tells the next officer nothing.
     """
 
     title: str | None = Field(default=None, min_length=3, max_length=200)
-    status: CaseStatus | None = None
     consent_threshold_pct: float | None = Field(default=None, ge=0, le=100)

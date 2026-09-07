@@ -142,8 +142,20 @@ def list_cases(
         # ilike with a bound parameter — the wildcards are ours, the value
         # stays parameterised, so a % or _ in user input cannot alter the
         # query's structure.
+        #
+        # Village and project are searched too, not just the case's own two
+        # columns: the search box offers all four, and an officer looking
+        # for "Ozar" or "Polavaram" was getting an empty table for a term
+        # that is on screen in front of them. Both tables are already
+        # inner-joined above for the row labels, so this costs no extra
+        # join.
         pattern = f"%{search}%"
-        query = query.filter(Case.case_number.ilike(pattern) | Case.title.ilike(pattern))
+        query = query.filter(
+            Case.case_number.ilike(pattern)
+            | Case.title.ilike(pattern)
+            | Village.name.ilike(pattern)
+            | Project.name.ilike(pattern)
+        )
     if overdue_only:
         # Filtered in SQL against the stored due date, so "show me what is
         # late" stays one indexed comparison rather than fetching every case
