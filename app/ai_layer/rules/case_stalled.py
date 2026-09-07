@@ -17,6 +17,16 @@ RULE = "case_stalled"
 def case_stalled(cases: list[dict], as_of: date) -> list[dict]:
     alerts = []
     for case in cases:
+        # A closed case's stage is SUPPOSED to stop changing. The loader
+        # hands every case to every rule (unused_land makes the same check
+        # for the same reason), so without this every completed acquisition
+        # raised a "stage unchanged" alert ten days after it finished and
+        # kept raising it, at high severity, for good — filling the alert
+        # table and the attention panel with the one category of case that
+        # needs no attention at all.
+        if case["status"] == "closed":
+            continue
+
         days = (as_of - case["stage_changed_at"]).days
         if days >= STALLED_CRITICAL_DAYS:
             severity = "high"
