@@ -114,6 +114,14 @@ class DocType(str, Enum):
     RNR_SCHEME_DOCUMENT = "rnr_scheme_document"
     POSSESSION_CERTIFICATE = "possession_certificate"
     MONITORING_REPORT = "monitoring_report"
+    # Field-survey-scoped evidence — distinct from the case-lifecycle types
+    # above, which a stage requires regardless of who did the fieldwork.
+    # These attach to a SurveyTask (see Document.survey_task_id) as well as
+    # a case.
+    SURVEY_REPORT = "survey_report"
+    FIELD_NOTE = "field_note"
+    SKETCH = "sketch"
+    MEASUREMENT_EVIDENCE = "measurement_evidence"
 
 
 class ProposalStatus(str, Enum):
@@ -268,6 +276,60 @@ class SurveyTaskStatus(str, Enum):
     SUBMITTED = "submitted"
     APPROVED = "approved"
     RETURNED = "returned"
+
+
+class LandUseType(str, Enum):
+    """What a field officer observes the parcel actually being used for —
+    independent of what the land record says it is classified as."""
+    AGRICULTURAL = "agricultural"
+    RESIDENTIAL = "residential"
+    COMMERCIAL = "commercial"
+    INDUSTRIAL = "industrial"
+    VACANT = "vacant"
+    OTHER = "other"
+
+
+class BoundaryCondition(str, Enum):
+    """How clearly the officer could establish the parcel's boundary on the
+    ground, independent of whether a boundary was actually walked and
+    recorded (SurveyTask.boundary_geom) — a boundary can be fully walked and
+    still judged unreliable, e.g. no visible markers to walk it against."""
+    VERIFIED = "verified"
+    PARTIALLY_VERIFIED = "partially_verified"
+    NOT_CLEARLY_IDENTIFIABLE = "not_clearly_identifiable"
+
+
+class SurveyPhotoCategory(str, Enum):
+    """What a field photo actually shows, so a reviewer can tell a boundary
+    shot from a survey-marker shot without opening every image."""
+    LAND_PARCEL = "land_parcel"
+    BOUNDARY = "boundary"
+    EXISTING_STRUCTURE = "existing_structure"
+    CROP_LAND_USE = "crop_land_use"
+    ROAD_ACCESS = "road_access"
+    NEARBY_STRUCTURE = "nearby_structure"
+    SURVEY_MARKER = "survey_marker"
+    OTHER = "other"
+
+
+class DiscrepancyType(str, Enum):
+    """What kind of mismatch a field officer is flagging between what the
+    record says and what they found on the ground."""
+    AREA_MISMATCH = "area_mismatch"
+    BOUNDARY_MISMATCH = "boundary_mismatch"
+    SURVEY_NUMBER_MISMATCH = "survey_number_mismatch"
+    OWNERSHIP_MISMATCH = "ownership_mismatch"
+    LAND_USE_MISMATCH = "land_use_mismatch"
+    MISSING_DOCUMENT = "missing_document"
+    OTHER = "other"
+
+
+class DiscrepancyStatus(str, Enum):
+    """Deliberately just two states, unlike Objection's four — a field
+    discrepancy report is a flag for a reviewing officer to look at and
+    close, not a quasi-legal proceeding with its own hearing stage."""
+    OPEN = "open"
+    RESOLVED = "resolved"
 
 
 class BiometricKind(str, Enum):
