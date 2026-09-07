@@ -18,7 +18,9 @@ from app.core.enums import (
     AlertSeverity,
     CaseStatus,
     CompensationStatus,
+    DocType,
     ObjectionStatus,
+    ParcelStatus,
     RnRStatus,
     Stage,
 )
@@ -103,6 +105,39 @@ def dashboard_kpis(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
 
+def _scoped_case_ids(
+    db: Session,
+    user: User,
+    *,
+    state_id: int | None,
+    district_id: int | None,
+    project_id: int | None,
+) -> list[int] | None:
+    """The caller's entitlement narrowed by whichever scope filters were
+    given, or None for "no restriction at all".
+
+    None is preserved when nothing was filtered, so an unrestricted admin
+    still avoids pulling every case id into Python just to send it back as
+    an IN clause — the reason `entitled_case_ids` returns None in the first
+    place. The moment a filter IS given there is a restriction to express,
+    and resolve_scope is the same one /kpis, /trends and /forecast use, so
+    every panel on the dashboard answers for the same set of cases.
+    """
+    entitled = entitled_case_ids(db, user)
+    if state_id is None and district_id is None and project_id is None:
+        return entitled
+    try:
+        return resolve_scope(
+            db,
+            state_id=state_id,
+            district_id=district_id,
+            project_id=project_id,
+            base_case_ids=entitled,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
 @router.get("/alerts", response_model=AlertList)
 def dashboard_alerts(
     db: Session = Depends(get_db),
@@ -110,14 +145,24 @@ def dashboard_alerts(
     severity: AlertSeverity | None = None,
     rule: str | None = Query(default=None, max_length=60),
     include_resolved: bool = False,
+    state_id: int | None = None,
+    district_id: int | None = None,
+    project_id: int | None = None,
     limit: int = Query(default=100, ge=1, le=500),
 ):
     """Alerts for the cases this user may see, worst first.
 
     Populated by POST /admin/run-rules. An empty list means the rules have
     not been run yet, not that nothing is wrong.
+
+    Takes the same scope arguments as /kpis. The dashboard has always sent
+    them; without them declared here FastAPI dropped them silently, so
+    narrowing to one district left this table showing the whole caseload
+    beside KPI tiles that had already narrowed.
     """
-    entitled = entitled_case_ids(db, user)
+    entitled = _scoped_case_ids(
+        db, user, state_id=state_id, district_id=district_id, project_id=project_id
+    )
     if entitled is not None and not entitled:
         return AlertList(items=[], total=0, by_severity={}, by_rule={})
 
@@ -181,6 +226,9 @@ def dashboard_alerts(
 def cases_requiring_attention(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
+    state_id: int | None = None,
+    district_id: int | None = None,
+    project_id: int | None = None,
     limit: int = Query(default=50, ge=1, le=200),
 ):
     """One row per case with at least one open finding, worst first — not
@@ -190,8 +238,13 @@ def cases_requiring_attention(
     land) is exactly the priority list a "cases requiring attention" panel
     needs, so this reads the same Alert table POST /admin/run-rules
     populates rather than re-deriving urgency from scratch.
+
+    Scoped by the same arguments as /kpis, so this panel narrows with the
+    rest of the dashboard rather than being the one that does not.
     """
-    entitled = entitled_case_ids(db, user)
+    entitled = _scoped_case_ids(
+        db, user, state_id=state_id, district_id=district_id, project_id=project_id
+    )
     if entitled is not None and not entitled:
         return AttentionList(items=[], total=0)
 
@@ -464,14 +517,29 @@ def field_work_queue(
 
 
 @router.get("/cases-by-stage", response_model=list[StageBreakdownItem])
-def cases_by_stage(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+def cases_by_stage(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    state_id: int | None = None,
+    district_id: int | None = None,
+    project_id: int | None = None,
+):
     """How many cases sit at each of the nine legal stages, and how many of
     those are past their deadline.
 
     Every stage is returned, including empty ones, so the chart keeps a
     stable set of bars instead of silently dropping categories.
+
+    Takes the same scope arguments as /kpis and resolves them the same way.
+    Without them this endpoint answered for the caller's whole entitlement
+    whatever the dashboard's own state/district/project selector said, so
+    narrowing to one district changed every panel on the page except this
+    one — which reads as the chart being wrong rather than unscoped.
     """
-    entitled = entitled_case_ids(db, user)
+    entitled = _scoped_case_ids(
+        db, user, state_id=state_id, district_id=district_id, project_id=project_id
+    )
+
     counts = {stage: 0 for stage in Stage}
     breached = {stage: 0 for stage in Stage}
 
@@ -631,6 +699,44 @@ def dashboard_trends(
     ):
         if period in empty:
             empty[period]["compensation_paid"] = int(amount)
+
+    # A parcel records that it was acquired but not when — the status is a
+    # state, with no date beside it. The dated fact closest to it is the
+    # case's own move into the possession stage, so a case's acquired area
+    # is attributed to the month it took possession. Stated rather than
+    # hidden, the same way compensation_paid is above: a per-parcel
+    # acquired_on column is the fix if this ever has to be exact.
+    #
+    # The FIRST such move, not every one: a case sent back from possession
+    # and re-advanced records two rows, and counting both would report the
+    # same hectares twice in two different months.
+    took_possession = (
+        db.query(
+            CaseStageHistory.case_id.label("case_id"),
+            func.min(CaseStageHistory.changed_on).label("on_date"),
+        )
+        .filter(
+            CaseStageHistory.case_id.in_(case_ids),
+            CaseStageHistory.to_stage == Stage.POSSESSION,
+        )
+        .group_by(CaseStageHistory.case_id)
+        .subquery()
+    )
+    for period, area in (
+        db.query(
+            month(took_possession.c.on_date),
+            func.coalesce(func.sum(Parcel.area_ha), 0.0),
+        )
+        .join(Parcel, Parcel.case_id == took_possession.c.case_id)
+        .filter(
+            took_possession.c.on_date >= start,
+            Parcel.status.in_((ParcelStatus.ACQUIRED, ParcelStatus.POSSESSION_TAKEN)),
+        )
+        .group_by(month(took_possession.c.on_date))
+        .all()
+    ):
+        if period in empty:
+            empty[period]["area_acquired_ha"] = round(float(area), 4)
 
     return TrendSeries(
         points=[TrendPoint(period=p, **empty[p]) for p in periods],

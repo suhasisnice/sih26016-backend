@@ -293,8 +293,15 @@ def update_compensation(
     # Paying an award in full settles it. Left to the client this drifts —
     # one screen marks it paid, another forgets, and the dashboard's
     # awarded-vs-paid figure stops agreeing with the rows beneath it.
-    if paid >= awarded and awarded > 0 and "status" not in fields:
-        record.status = CompensationStatus.PAID
+    if "status" not in fields and awarded > 0:
+        if paid >= awarded:
+            record.status = CompensationStatus.PAID
+        elif record.status is CompensationStatus.PAID:
+            # And the reverse, which the same argument demands: revising the
+            # market value upward on a settled award reopens a balance, and
+            # a record still reading "paid" with money outstanding is
+            # counted as settled by every figure downstream of it.
+            record.status = CompensationStatus.AWARDED
 
     audit.record(
         db,

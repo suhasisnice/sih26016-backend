@@ -70,6 +70,20 @@ def advance_case(
             ),
         )
 
+    # A case that was put on hold stays on hold until somebody resumes it
+    # and says why. Without this the status assignment below would quietly
+    # set it back to ACTIVE, so advancing a stage would silently undo a
+    # hold — losing the one thing the hold recorded, which is that an
+    # officer decided this case could not proceed as it stood.
+    if case.status is CaseStatus.STALLED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "This case is on hold and cannot be moved. Resume it first, "
+                "recording what was addressed."
+            ),
+        )
+
     # An objection filed under s.21 has to be disposed of before the
     # declaration under s.19 can issue — advancing past it with the
     # objection still open would let the declaration outrun its own record.
