@@ -10,6 +10,7 @@ class DocumentOut(BaseModel):
 
     id: int
     case_id: int
+    survey_task_id: int | None = None
     doc_type: DocType
     filename: str
     content_type: str
