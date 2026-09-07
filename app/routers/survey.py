@@ -8,14 +8,21 @@ app.routers.parcels) or filing a document (app.routers.documents).
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.core.enums import Role, SurveyTaskStatus
-from app.dependencies import entitled_case_ids, get_current_user, get_db, require_role, scope_cases_to_user
+from app.core.enums import AlertSeverity, Role, SurveyPhotoCategory, SurveyTaskStatus
+from app.dependencies import (
+    entitled_case_ids,
+    get_current_user,
+    get_db,
+    require_role,
+    scope_cases_to_user,
+    verify_stepup,
+)
 from app.models import Case, Parcel, SurveyPhoto, SurveyTask, User
 from app.schemas.common import Message
 from app.schemas.survey import (
@@ -27,7 +34,7 @@ from app.schemas.survey import (
     SurveyTaskOut,
     SurveyTaskSaveRequest,
 )
-from app.services import audit, geometry
+from app.services import audit, geometry, notify
 from app.services.uploads import save_upload_file
 
 router = APIRouter(prefix="/survey-tasks", tags=["survey"])
@@ -113,6 +120,14 @@ def _task_out(db: Session, task: SurveyTask) -> SurveyTaskOut:
         boundary_point_count=point_count,
         has_location=task.location_geom is not None,
         remarks=task.remarks,
+        land_use=task.land_use,
+        boundary_condition=task.boundary_condition,
+        physical_features=task.physical_features,
+        checklist=task.checklist,
+        on_site_person_name=task.on_site_person_name,
+        on_site_person_relation=task.on_site_person_relation,
+        person_verified=task.person_verified,
+        person_verification_note=task.person_verification_note,
         submitted_at=task.submitted_at,
         reviewed_by_name=reviewed_by.full_name if reviewed_by else None,
         reviewed_at=task.reviewed_at,
@@ -312,6 +327,22 @@ def save_survey_task(
         task.location_geom = geometry.point_ewkt(loc.latitude, loc.longitude) if loc else None
     if "remarks" in fields:
         task.remarks = payload.remarks
+    if "land_use" in fields:
+        task.land_use = payload.land_use
+    if "boundary_condition" in fields:
+        task.boundary_condition = payload.boundary_condition
+    if "physical_features" in fields:
+        task.physical_features = payload.physical_features
+    if "checklist" in fields:
+        task.checklist = payload.checklist
+    if "on_site_person_name" in fields:
+        task.on_site_person_name = payload.on_site_person_name
+    if "on_site_person_relation" in fields:
+        task.on_site_person_relation = payload.on_site_person_relation
+    if "person_verified" in fields:
+        task.person_verified = bool(payload.person_verified)
+    if "person_verification_note" in fields:
+        task.person_verification_note = payload.person_verification_note
 
     db.commit()
     db.refresh(task)
@@ -324,6 +355,7 @@ async def upload_survey_photo(
     latitude: float | None = Form(default=None),
     longitude: float | None = Form(default=None),
     caption: str | None = Form(default=None, max_length=200),
+    category: SurveyPhotoCategory | None = Form(default=None),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
     user: User = Depends(require_role(*SURVEY_PERFORMERS)),
@@ -345,6 +377,7 @@ async def upload_survey_photo(
         latitude=latitude,
         longitude=longitude,
         caption=caption,
+        category=category,
         uploaded_by_user_id=user.id,
     )
     db.add(photo)
@@ -409,7 +442,12 @@ def submit_survey_task(
     task_id: int,
     db: Session = Depends(get_db),
     user: User = Depends(require_role(*SURVEY_PERFORMERS)),
+    x_stepup_token: str | None = Header(default=None),
 ):
+    """Final submission of a field survey report always needs a fresh
+    biometric re-confirmation — unlike case-stage advancement, where only a
+    handful of high-impact stages require it, every survey submission is
+    the officer's sign-off on their own fieldwork."""
     task = _task_or_404(db, user, task_id)
     if task.assigned_to_user_id != user.id:
         raise HTTPException(status.HTTP_403_FORBIDDEN, detail="This survey is not assigned to you")
@@ -417,6 +455,7 @@ def submit_survey_task(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, detail=f"Cannot submit a task that is {task.status.value}"
         )
+    verify_stepup(x_stepup_token, user)
 
     has_photo = (
         db.query(SurveyPhoto.id).filter(SurveyPhoto.survey_task_id == task.id).first() is not None
@@ -462,6 +501,15 @@ def approve_survey_task(
         db, user, action="survey_task.approve", entity_type="survey_task", entity_id=task.id,
         detail=task.review_note or "",
     )
+    notify.notify_user(
+        db,
+        user_id=task.assigned_to_user_id,
+        title="Survey approved",
+        body=f"{task.case.case_number}: your field survey report has been approved."
+        + (f" {task.review_note}" if task.review_note else ""),
+        severity=AlertSeverity.LOW,
+        case_id=task.case_id,
+    )
     db.commit()
     db.refresh(task)
     return _task_out(db, task)
@@ -489,6 +537,14 @@ def return_survey_task(
     audit.record(
         db, user, action="survey_task.return", entity_type="survey_task", entity_id=task.id,
         detail=task.review_note,
+    )
+    notify.notify_user(
+        db,
+        user_id=task.assigned_to_user_id,
+        title="Survey returned for correction",
+        body=f"{task.case.case_number}: {task.review_note}",
+        severity=AlertSeverity.MEDIUM,
+        case_id=task.case_id,
     )
     db.commit()
     db.refresh(task)

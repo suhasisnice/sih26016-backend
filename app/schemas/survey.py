@@ -7,7 +7,7 @@ from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.enums import SurveyTaskStatus
+from app.core.enums import BoundaryCondition, LandUseType, SurveyPhotoCategory, SurveyTaskStatus
 
 
 class LatLng(BaseModel):
@@ -37,6 +37,18 @@ class SurveyTaskSaveRequest(BaseModel):
     location: LatLng | None = None
     remarks: str | None = Field(default=None, max_length=4000)
 
+    # --- Field observations (mobile survey wizard) ---
+    land_use: LandUseType | None = None
+    boundary_condition: BoundaryCondition | None = None
+    physical_features: list[str] | None = None
+    checklist: dict | None = None
+
+    # --- On-site person, only when different from the recorded owner ---
+    on_site_person_name: str | None = Field(default=None, max_length=120)
+    on_site_person_relation: str | None = Field(default=None, max_length=80)
+    person_verified: bool | None = None
+    person_verification_note: str | None = Field(default=None, max_length=4000)
+
 
 class SurveyReviewRequest(BaseModel):
     """Optional to approve, required to return — enforced in the router the
@@ -53,6 +65,7 @@ class SurveyPhotoOut(BaseModel):
     latitude: float | None
     longitude: float | None
     caption: str | None
+    category: SurveyPhotoCategory | None
     uploaded_at: datetime
 
 
@@ -79,6 +92,16 @@ class SurveyTaskOut(BaseModel):
     boundary_point_count: int
     has_location: bool
     remarks: str | None
+
+    land_use: LandUseType | None
+    boundary_condition: BoundaryCondition | None
+    physical_features: list[str] | None
+    checklist: dict | None
+    on_site_person_name: str | None
+    on_site_person_relation: str | None
+    person_verified: bool
+    person_verification_note: str | None
+
     submitted_at: datetime | None
     reviewed_by_name: str | None
     reviewed_at: datetime | None
