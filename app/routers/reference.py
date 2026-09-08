@@ -10,8 +10,8 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.dependencies import get_current_user, get_db
-from app.models import Case, District, Project, State, User, Village
-from app.schemas.reference import DistrictOut, ProjectOut, StateOut, VillageOut
+from app.models import Case, District, Project, State, Statute, User, Village
+from app.schemas.reference import DistrictOut, ProjectOut, StateOut, StatuteOut, VillageOut
 
 router = APIRouter(tags=["reference"])
 
@@ -108,7 +108,11 @@ def list_projects(
     # Case counts come from one grouped query rather than one per project.
     counts = dict(db.query(Case.project_id, func.count(Case.id)).group_by(Case.project_id).all())
 
-    query = db.query(Project, District.name).join(District, Project.district_id == District.id)
+    query = (
+        db.query(Project, District.name, Statute.code)
+        .join(District, Project.district_id == District.id)
+        .outerjoin(Statute, Project.statute_id == Statute.id)
+    )
     if district_id is not None:
         query = query.filter(Project.district_id == district_id)
 
@@ -120,6 +124,20 @@ def list_projects(
             district_id=project.district_id,
             district_name=district_name,
             case_count=counts.get(project.id, 0),
+            statute_id=project.statute_id,
+            statute_code=statute_code,
         )
-        for project, district_name in query.order_by(Project.name).all()
+        for project, district_name, statute_code in query.order_by(Project.name).all()
     ]
+
+
+@router.get("/statutes", response_model=list[StatuteOut])
+def list_statutes(db: Session = Depends(get_db), _: User = Depends(get_current_user)):
+    """Every act a project can be governed by, with what each of the
+    system's nine stages means under it — the section it cites, and
+    whether that act mandates the stage at all. See
+    app.services.statutes, which seeds this at boot, and
+    StatuteStageReference's docstring in app.models.tables for what this
+    does and does not change about how a case's stage actually moves.
+    """
+    return db.query(Statute).order_by(Statute.code).all()

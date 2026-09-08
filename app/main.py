@@ -6,7 +6,7 @@ from sqlalchemy import text
 
 from app import models  # noqa: F401  registers every table on Base.metadata
 from app.config import settings
-from app.services import scheduler, sla
+from app.services import scheduler, sla, statutes
 from app.database import Base, SessionLocal, engine
 from app.routers import (
     admin, auth, biometrics, cases, dashboard, discrepancies, documents,
@@ -26,6 +26,11 @@ async def lifespan(_: FastAPI):
 
     with SessionLocal() as session:
         added = sla.seed_defaults(session)
+        if added:
+            session.commit()
+
+    with SessionLocal() as session:
+        added = statutes.seed_defaults(session)
         if added:
             session.commit()
 
