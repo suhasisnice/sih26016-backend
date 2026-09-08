@@ -7,6 +7,8 @@ districts to offer.
 
 from pydantic import BaseModel, ConfigDict
 
+from app.core.enums import Stage
+
 
 class StateOut(BaseModel):
     """A State or Union Territory.
@@ -60,3 +62,23 @@ class ProjectOut(BaseModel):
     district_id: int
     district_name: str
     case_count: int
+    statute_id: int | None = None
+    statute_code: str | None = None
+
+
+class StatuteStageReferenceOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    stage: Stage
+    is_applicable: bool
+    section_reference: str | None = None
+    note: str | None = None
+
+
+class StatuteOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    code: str
+    name: str
+    stage_references: list[StatuteStageReferenceOut] = []

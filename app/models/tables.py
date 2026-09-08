@@ -211,6 +211,65 @@ class Village(Base):
     district: Mapped[District] = relationship(back_populates="villages")
 
 
+class Statute(Base):
+    """A land acquisition act a project can be governed by.
+
+    Deliberately does not replace the `Stage` enum — see
+    StatuteStageReference below for why. This table exists so a second
+    act is an INSERT, not a code change, for the one part of "the law is
+    data" that is safe to make data-driven without touching the live
+    transition engine: which section a stage cites, and whether a stage
+    applies at all under a given act.
+    """
+
+    __tablename__ = "statutes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    code: Mapped[str] = mapped_column(String(30), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+
+    stage_references: Mapped[list["StatuteStageReference"]] = relationship(
+        back_populates="statute", order_by="StatuteStageReference.id"
+    )
+
+
+class StatuteStageReference(Base):
+    """What one of the system's nine Stage values means under one statute:
+    the section it cites, and whether the stage applies at all.
+
+    This is the config-driven half of Law 4, sized to what is safe to
+    build without touching the live case engine. The bigger half — a
+    second act with its own stage *sequence*, deadlines and transition
+    rules — would mean Case.stage stopping being a single enum every
+    dashboard aggregate, the SLA table and the predictive model
+    (app.ai_layer.predict's STAGE_ORDER) already assume a fixed, ordered
+    reading of. That is a real rewrite across all three, not an
+    addition, and is deliberately out of scope here — see the commit
+    this table was added in for the full reasoning. What this table adds
+    instead is genuinely useful on its own: a case's stage can be shown
+    against the section that actually governs it, for whichever act its
+    project falls under, today.
+    """
+
+    __tablename__ = "statute_stage_references"
+    __table_args__ = (
+        UniqueConstraint("statute_id", "stage", name="uq_statute_stage_references_statute_stage"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    statute_id: Mapped[int] = mapped_column(ForeignKey("statutes.id"), nullable=False, index=True)
+    stage: Mapped[Stage] = mapped_column(_enum(Stage, "stage"), nullable=False)
+    # False for a stage this act does not mandate at all (the National
+    # Highways Act carries no Social Impact Assessment or Second Schedule
+    # R&R requirement of its own) — distinct from simply having no
+    # section_reference, which would read as "applies, citation missing".
+    is_applicable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    section_reference: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    note: Mapped[str | None] = mapped_column(String(300), nullable=True)
+
+    statute: Mapped["Statute"] = relationship(back_populates="stage_references")
+
+
 class Project(Base):
     __tablename__ = "projects"
 
@@ -218,6 +277,13 @@ class Project(Base):
     name: Mapped[str] = mapped_column(String(160), nullable=False)
     requiring_body: Mapped[str] = mapped_column(String(120), nullable=False)
     district_id: Mapped[int] = mapped_column(ForeignKey("districts.id"), nullable=False, index=True)
+    # Which act governs this project's acquisitions — nullable because most
+    # existing projects predate this column and default to none named
+    # (read as RFCTLARR, the act every stage/deadline/dashboard figure in
+    # this system already assumes) rather than being backfilled with a
+    # guess. See StatuteStageReference above for what this does and does
+    # not change.
+    statute_id: Mapped[int | None] = mapped_column(ForeignKey("statutes.id"), nullable=True)
 
     # See DataSource in app.core.enums: every project in this prototype is
     # invented, since no real, citable acquisition-project dataset is
@@ -231,6 +297,8 @@ class Project(Base):
     provenance_status: Mapped[ProvenanceStatus] = mapped_column(
         _enum(ProvenanceStatus, "provenance_status"), nullable=False, default=ProvenanceStatus.SYNTHETIC
     )
+
+    statute: Mapped["Statute | None"] = relationship()
 
     district: Mapped[District] = relationship()
 
