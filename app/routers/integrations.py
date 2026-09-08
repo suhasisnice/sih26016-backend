@@ -18,7 +18,7 @@ from app.dependencies import get_current_user, get_db, require_role, scope_cases
 from app.integrations import available_providers, get_provider
 from app.integrations.base import LandRecordNotFound, LandRecordUnavailable
 from app.integrations.providers import configured_key
-from app.models import Case, User, Village
+from app.models import Case, District, State, User, Village
 from app.schemas.integration import (
     ProviderList,
     ProviderOut,
@@ -29,6 +29,24 @@ from app.schemas.integration import (
 from app.services import audit, landrecords
 
 router = APIRouter(prefix="/integrations", tags=["integrations"])
+
+
+def _state_for_village_lgd(db: Session, village_lgd: str) -> str | None:
+    """Which state a village belongs to, so get_provider can route to that
+    state's own adapter instead of whatever is globally configured."""
+    return (
+        db.query(State.name)
+        .join(District, District.state_id == State.id)
+        .join(Village, Village.district_id == District.id)
+        .filter(Village.lgd_code == village_lgd)
+        .scalar()
+    )
+
+
+def _state_for_district(db: Session, district_id: int) -> str | None:
+    return db.query(State.name).join(District, District.state_id == State.id).filter(
+        District.id == district_id
+    ).scalar()
 
 # Who may query an external portal. Deliberately not every signed-in role: a
 # landowner has no business running lookups against other people's holdings,
@@ -79,7 +97,7 @@ def lookup_land_record(
     user: User = Depends(require_role(*LOOKUP_ROLES)),
 ):
     """One parcel as the external portal describes it."""
-    provider = get_provider(db)
+    provider = get_provider(db, state=_state_for_village_lgd(db, village_lgd))
     try:
         record = provider.fetch(village_lgd, survey_number)
     except LandRecordNotFound as exc:
@@ -132,7 +150,7 @@ def reconcile(
     if case is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Case not found")
 
-    provider = get_provider(db)
+    provider = get_provider(db, state=_state_for_district(db, case.district_id))
     report = landrecords.reconcile_case(db, provider, case_id)
 
     audit.record(
