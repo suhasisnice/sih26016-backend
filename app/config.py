@@ -2,6 +2,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 DEV_SECRET_KEY = "dev-only-insecure-key-set-SECRET_KEY-before-any-shared-deployment"
 
+# A valid Fernet key (32 url-safe base64 bytes), committed in the clear on
+# purpose — same reasoning as DEV_SECRET_KEY. See app.services.crypto's
+# module docstring for why this is not enforced at production boot the way
+# SECRET_KEY is.
+DEV_ENCRYPTION_KEY = "3mMvGVbPVYmcGGVjsUw4-opIrxxCRaKwyYi3fRd1STE="
+
 
 class Settings(BaseSettings):
     environment: str = "development"
@@ -9,6 +15,7 @@ class Settings(BaseSettings):
     frontend_origin: str = "http://localhost:5173"
     upload_dir: str = "/app/uploads"
     secret_key: str = DEV_SECRET_KEY
+    encryption_key: str = DEV_ENCRYPTION_KEY
     algorithm: str = "HS256"
     access_token_expire_minutes: int = 12 * 60
     max_upload_bytes: int = 10 * 1024 * 1024
