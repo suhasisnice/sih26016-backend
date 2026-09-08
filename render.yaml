@@ -64,13 +64,12 @@ services:
         value: "60"
 
       - key: FRONTEND_ORIGIN
-        # Both origins during the rename: Render creates a new service
-        # rather than renaming the old one, so the two coexist until
-        # sih26016-frontend is deleted by hand. Dropping the old origin
-        # before that would break it with a CORS failure while it is still
-        # reachable and still looks fine to curl. Trim this to the one
-        # entry once the old service is gone.
-        value: https://bhoomimitra.onrender.com,https://sih26016-frontend.onrender.com
+        # Render assigned this account's static site bhoomimitra-gdup.onrender.com
+        # instead of bhoomimitra.onrender.com (name already taken), so that's
+        # the origin that has to be allowed here — see DEPLOYMENT.md's note
+        # on FRONTEND_ORIGIN/CORS being the first thing to check when the
+        # API answers curl fine but the browser app doesn't.
+        value: https://bhoomimitra-gdup.onrender.com
 
     # Uploaded documents land in /app/uploads, which is ephemeral on the
     # free plan — every deploy and every wake-from-sleep starts with an
