@@ -7,8 +7,8 @@ from sqlalchemy.orm import Session
 
 from app.core.enums import MutationStatus, ParcelStatus, Role
 from app.dependencies import get_current_user, get_db, require_role, scope_cases_to_user
-from app.integrations.providers import configured_key, get_provider
-from app.models import Case, District, MutationRequest, Parcel, Person, Project, User, Village
+from app.integrations.providers import get_provider
+from app.models import Case, District, MutationRequest, Parcel, Person, Project, State, User, Village
 from app.schemas import (
     ParcelFeature,
     ParcelFeatureCollection,
@@ -553,14 +553,20 @@ def request_mutation(
             detail="Possession must be taken before a mutation request can be sent",
         )
 
-    provider = get_provider(db)
+    state_name = (
+        db.query(State.name)
+        .join(District, District.state_id == State.id)
+        .filter(District.id == case.district_id)
+        .scalar()
+    )
+    provider = get_provider(db, state=state_name)
     ack = provider.push_mutation(ulpin=parcel.ulpin or "", survey_number=parcel.survey_number)
 
     mutation = MutationRequest(
         parcel_id=parcel.id,
         case_id=case.id,
         ulpin=parcel.ulpin,
-        adapter=configured_key(),
+        adapter=provider.info.key,
         sent_on=date.today(),
         external_ref=ack.external_ref,
         status=MutationStatus(ack.status),
@@ -576,7 +582,7 @@ def request_mutation(
         action="mutation.request",
         entity_type="parcel",
         entity_id=parcel.id,
-        detail=f"adapter={configured_key()} status={ack.status} ref={ack.external_ref or '—'}",
+        detail=f"adapter={provider.info.key} status={ack.status} ref={ack.external_ref or '—'}",
     )
     db.commit()
     db.refresh(mutation)
