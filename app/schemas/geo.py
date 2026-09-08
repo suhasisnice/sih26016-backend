@@ -37,6 +37,12 @@ class ParcelOut(BaseModel):
     owner_name: str
     longitude: float
     latitude: float
+    # Set when a re-survey's measured area differs from area_ha by more than
+    # survey.AREA_DISCREPANCY_TOLERANCE — see Parcel's docstring for why
+    # this compares against a stored boundary_field rather than overwriting
+    # the boundary of record.
+    has_boundary_discrepancy: bool = False
+    area_diff_pct: float | None = None
     provenance: ProvenanceOut
 
 
@@ -99,6 +105,11 @@ class ParcelProperties(BaseModel):
     # says so in the sidebar; a reviewer is entitled to know which they are
     # looking at.
     has_boundary: bool = False
+    # A re-survey measured a materially different area from the record —
+    # see ParcelOut. The map colours a flagged parcel distinctly so an
+    # officer notices it without opening every popup.
+    has_boundary_discrepancy: bool = False
+    area_diff_pct: float | None = None
     provenance: ProvenanceOut
 
 

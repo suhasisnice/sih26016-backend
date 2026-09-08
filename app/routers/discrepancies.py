@@ -12,9 +12,9 @@ from datetime import date
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from app.core.enums import AlertSeverity, DiscrepancyStatus, Role
+from app.core.enums import AlertSeverity, DiscrepancyStatus, DiscrepancyType, Role
 from app.dependencies import get_current_user, get_db, require_role, scope_cases_to_user
-from app.models import Case, SurveyDiscrepancy, SurveyTask, User
+from app.models import Case, Parcel, SurveyDiscrepancy, SurveyTask, User
 from app.schemas.discrepancy import (
     DiscrepancyCreate,
     DiscrepancyList,
@@ -148,6 +148,29 @@ def respond_to_discrepancy(
     row.response = payload.response
     row.responded_by_user_id = user.id
     row.responded_on = date.today()
+
+    # Clear the parcel's map flag once nothing open is still explaining it.
+    # Scoped to the parcel, not just this row: two re-surveys can each raise
+    # their own area-mismatch discrepancy against the same parcel, and
+    # resolving one must not silently clear a flag the other still earns.
+    if row.discrepancy_type == DiscrepancyType.AREA_MISMATCH:
+        task = db.get(SurveyTask, row.survey_task_id)
+        if task is not None and task.parcel_id is not None:
+            other_open = (
+                db.query(SurveyDiscrepancy.id)
+                .join(SurveyTask, SurveyDiscrepancy.survey_task_id == SurveyTask.id)
+                .filter(
+                    SurveyTask.parcel_id == task.parcel_id,
+                    SurveyDiscrepancy.discrepancy_type == DiscrepancyType.AREA_MISMATCH,
+                    SurveyDiscrepancy.status == DiscrepancyStatus.OPEN,
+                    SurveyDiscrepancy.id != row.id,
+                )
+                .first()
+            )
+            if other_open is None:
+                parcel = db.get(Parcel, task.parcel_id)
+                if parcel is not None:
+                    parcel.has_boundary_discrepancy = False
 
     audit.record(
         db,
