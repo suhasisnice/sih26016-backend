@@ -31,6 +31,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
+# dlib's own CMake build defaults to one compile job per core, and Render's
+# free-tier build machines advertise more cores than they have RAM for —
+# confirmed by an actual build that died at "Ran out of memory (used over
+# 8GB)" partway through dlib before this line existed. Each parallel
+# compile job for dlib's C++ (heavy template instantiation, several files
+# over 1MB of generated object code apiece) can run into the hundreds of
+# MB, and a handful running at once is what blew past 8GB. Capping the
+# build to one job trades build time for peak memory — slower, but it
+# fits the ceiling instead of getting killed partway through it. No
+# prebuilt wheel exists to route around this (checked directly against
+# PyPI: dlib ships sdist-only for every release), which is also why the
+# comment above resigned itself to compiling from source at all.
+ENV CMAKE_BUILD_PARALLEL_LEVEL=1
 RUN pip install --no-cache-dir -r requirements.txt \
     && apt-get purge -y --auto-remove gcc g++ make cmake \
     && rm -rf /var/lib/apt/lists/*
