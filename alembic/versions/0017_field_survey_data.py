@@ -25,6 +25,14 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # op.add_column, unlike op.create_table, never triggers an enum
+    # column's own before_create — that only fires for a CREATE TABLE.
+    # Without these explicit create() calls each ALTER TABLE below fails
+    # with "type ... does not exist" on any database, fresh included.
+    sa.Enum(
+        'agricultural', 'residential', 'commercial', 'industrial', 'vacant', 'other',
+        name='land_use_type',
+    ).create(op.get_bind(), checkfirst=True)
     op.add_column(
         'survey_tasks',
         sa.Column(
@@ -36,6 +44,10 @@ def upgrade() -> None:
             nullable=True,
         ),
     )
+    sa.Enum(
+        'verified', 'partially_verified', 'not_clearly_identifiable',
+        name='boundary_condition',
+    ).create(op.get_bind(), checkfirst=True)
     op.add_column(
         'survey_tasks',
         sa.Column(
@@ -63,6 +75,11 @@ def upgrade() -> None:
     )
     op.add_column('survey_tasks', sa.Column('person_verification_note', sa.Text(), nullable=True))
 
+    sa.Enum(
+        'land_parcel', 'boundary', 'existing_structure', 'crop_land_use', 'road_access',
+        'nearby_structure', 'survey_marker', 'other',
+        name='survey_photo_category',
+    ).create(op.get_bind(), checkfirst=True)
     op.add_column(
         'survey_photos',
         sa.Column(

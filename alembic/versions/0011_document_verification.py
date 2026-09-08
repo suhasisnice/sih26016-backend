@@ -17,6 +17,15 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    # op.add_column, unlike op.create_table, never triggers the enum type's
+    # own before_create — that only fires for a CREATE TABLE. Without this
+    # explicit create() the ALTER TABLE below fails with
+    # "type document_verification_status does not exist" on any database,
+    # fresh included.
+    sa.Enum(
+        'pending', 'verified', 'rejected', 'correction_requested',
+        name='document_verification_status',
+    ).create(op.get_bind(), checkfirst=True)
     op.add_column(
         'documents',
         sa.Column(
