@@ -361,15 +361,40 @@ class Parcel(Base):
     geom = mapped_column(
         Geometry(geometry_type="POINT", srid=4326, spatial_index=False), nullable=False
     )
-    # The surveyed outline, when there is one. Nullable on purpose: a field
-    # officer standing in a plot with a phone can give a GPS fix and cannot
-    # give a boundary, so a parcel registered from the field has a point and
-    # no polygon until a survey is attached. The map falls back to drawing
-    # the point, which is honest — an outline nobody surveyed should not be
+    # The surveyed outline of record. Nullable on purpose: a field officer
+    # standing in a plot with a phone can give a GPS fix and cannot give a
+    # boundary, so a parcel registered from the field has a point and no
+    # polygon until a survey is attached. The map falls back to drawing the
+    # point, which is honest — an outline nobody surveyed should not be
     # drawn as though somebody had.
+    #
+    # Written exactly once, by the FIRST survey approved against this
+    # parcel (app.routers.survey.approve_survey_task) — every re-survey
+    # after that compares against it rather than replacing it. That is what
+    # makes it "of record" rather than just "most recent".
     boundary = mapped_column(
         Geometry(geometry_type="POLYGON", srid=4326, spatial_index=False), nullable=True
     )
+    # The most recently walked boundary, from the most recently approved
+    # survey — set on every approval, including the first (where it starts
+    # out identical to `boundary`). Kept separate rather than overwriting
+    # `boundary` in place: a field re-measurement is evidence to weigh
+    # against the record, not a silent replacement of it. See
+    # area_diff_pct/has_boundary_discrepancy below for what the two are
+    # compared on.
+    boundary_field = mapped_column(
+        Geometry(geometry_type="POLYGON", srid=4326, spatial_index=False), nullable=True
+    )
+    # How far the most recent field-measured area differs from area_ha, as
+    # a fraction (0.05 = 5%) — set alongside boundary_field, left null until
+    # a second survey gives something to compare the first against.
+    area_diff_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # True when that difference exceeds survey.AREA_DISCREPANCY_TOLERANCE.
+    # Denormalised onto the parcel (rather than computed from
+    # survey_discrepancies on every read) because the map colours parcels by
+    # it — see MapView.jsx — and a map layer should not need a join per
+    # parcel to decide a fill colour.
+    has_boundary_discrepancy: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     # See DataSource in app.core.enums. The GPS point sits inside a real
     # district's real bounding box, but the exact coordinate and every other
@@ -396,6 +421,7 @@ Index("ix_parcels_geom", Parcel.geom, postgresql_using="gist")
 # it gets its own index rather than forcing a sequential scan the first time
 # somebody asks a real spatial question of it.
 Index("ix_parcels_boundary", Parcel.boundary, postgresql_using="gist")
+Index("ix_parcels_boundary_field", Parcel.boundary_field, postgresql_using="gist")
 
 
 class SurveyTask(Base):

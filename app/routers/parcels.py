@@ -115,6 +115,8 @@ def _parcel_properties(
         longitude=float(lon),
         latitude=float(lat),
         has_boundary=parcel.boundary is not None,
+        has_boundary_discrepancy=parcel.has_boundary_discrepancy,
+        area_diff_pct=parcel.area_diff_pct,
         provenance=provenance.out(parcel),
     )
 
@@ -271,6 +273,8 @@ def list_parcels_for_case(
             owner_name=owner_name,
             longitude=float(lon),
             latitude=float(lat),
+            has_boundary_discrepancy=parcel.has_boundary_discrepancy,
+            area_diff_pct=parcel.area_diff_pct,
             provenance=provenance.out(parcel),
         )
         for parcel, owner_name, lon, lat in rows
@@ -316,6 +320,8 @@ def get_parcel(
         owner_name=owner_name,
         longitude=float(lon),
         latitude=float(lat),
+        has_boundary_discrepancy=parcel.has_boundary_discrepancy,
+        area_diff_pct=parcel.area_diff_pct,
         provenance=provenance.out(parcel),
     )
 
@@ -334,6 +340,8 @@ def _parcel_out(parcel: Parcel, owner_name: str, lon: float, lat: float) -> Parc
         owner_name=owner_name,
         longitude=float(lon),
         latitude=float(lat),
+        has_boundary_discrepancy=parcel.has_boundary_discrepancy,
+        area_diff_pct=parcel.area_diff_pct,
         provenance=provenance.out(parcel),
     )
 

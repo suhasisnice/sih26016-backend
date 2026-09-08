@@ -6,7 +6,7 @@ app.routers.parcels) or filing a document (app.routers.documents).
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, UploadFile, status
@@ -15,7 +15,14 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.core.enums import AlertSeverity, Role, SurveyPhotoCategory, SurveyTaskStatus
+from app.core.enums import (
+    AlertSeverity,
+    DiscrepancyStatus,
+    DiscrepancyType,
+    Role,
+    SurveyPhotoCategory,
+    SurveyTaskStatus,
+)
 from app.dependencies import (
     entitled_case_ids,
     get_current_user,
@@ -24,7 +31,7 @@ from app.dependencies import (
     scope_cases_to_user,
     verify_stepup,
 )
-from app.models import Case, Parcel, SurveyPhoto, SurveyTask, User
+from app.models import Case, Parcel, SurveyDiscrepancy, SurveyPhoto, SurveyTask, User
 from app.schemas.common import Message
 from app.schemas.survey import (
     AssignableOfficerOut,
@@ -60,6 +67,13 @@ PHOTO_CONTENT_TYPES = {
 # A returned task is editable again — sending it back is a request for
 # correction, not a dead end.
 EDITABLE_STATUSES = (SurveyTaskStatus.IN_PROGRESS, SurveyTaskStatus.RETURNED)
+
+# How far a re-survey's measured area may differ from the parcel's area of
+# record before it is worth flagging, as a fraction (0.05 = 5%). Looser than
+# landrecords.AREA_TOLERANCE_FRACTION's 1%: that compares an acquisition
+# file against an official revenue record, this compares two independent
+# field walks, each carrying its own GPS and pacing error.
+AREA_DISCREPANCY_TOLERANCE = 0.05
 
 
 def _task_or_404(db: Session, user: User, task_id: int) -> SurveyTask:
@@ -524,11 +538,42 @@ def approve_survey_task(
     # on the map with nothing to put it back. It is the same rule
     # documents.py states for verification status: an artefact nobody has
     # reviewed must not carry the authority of one that has been.
+    #
+    # `boundary` is the record and is written only once, by the first
+    # approved survey. Every survey after that — including this one, if
+    # there is a prior boundary — instead updates `boundary_field` and
+    # compares this task's measured_area_ha against the parcel's area of
+    # record, so a re-survey is evidence weighed against the file rather
+    # than a silent replacement of it. See Parcel's docstring.
     applied_boundary = False
+    discrepancy_detail = ""
     if task.boundary_geom is not None and task.parcel_id is not None:
         parcel = db.get(Parcel, task.parcel_id)
         if parcel is not None:
-            parcel.boundary = task.boundary_geom
+            is_first_boundary = parcel.boundary is None
+            parcel.boundary_field = task.boundary_geom
+            if is_first_boundary:
+                parcel.boundary = task.boundary_geom
+            elif task.measured_area_ha is not None and parcel.area_ha:
+                diff = abs(task.measured_area_ha - parcel.area_ha) / parcel.area_ha
+                parcel.area_diff_pct = round(diff, 4)
+                parcel.has_boundary_discrepancy = diff > AREA_DISCREPANCY_TOLERANCE
+                if parcel.has_boundary_discrepancy:
+                    db.add(
+                        SurveyDiscrepancy(
+                            survey_task_id=task.id,
+                            case_id=task.case_id,
+                            discrepancy_type=DiscrepancyType.AREA_MISMATCH,
+                            description=(
+                                f"Re-survey measured {task.measured_area_ha:.4f} ha against "
+                                f"{parcel.area_ha:.4f} ha on record — a {diff * 100:.1f}% difference."
+                            ),
+                            status=DiscrepancyStatus.OPEN,
+                            filed_by_user_id=user.id,
+                            filed_on=date.today(),
+                        )
+                    )
+                    discrepancy_detail = f" [boundary discrepancy flagged: {diff * 100:.1f}% area difference]"
             applied_boundary = True
 
     task.status = SurveyTaskStatus.APPROVED
@@ -544,6 +589,7 @@ def approve_survey_task(
                 if applied_boundary
                 else ""
             )
+            + discrepancy_detail
         ).strip(),
     )
     notify.notify_user(
