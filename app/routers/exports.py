@@ -52,6 +52,7 @@ from app.models import (
     User,
     Village,
 )
+from app.routers.dashboard import dashboard_trends
 from app.services import audit, sla
 
 router = APIRouter(prefix="/exports", tags=["exports"])
@@ -122,6 +123,40 @@ def _scoped_cases(db: Session, user: User, state_id: int | None, district_id: in
     return query.order_by(Case.case_number)
 
 
+# The case register's columns, in their default order — also the allow-list
+# for the `columns` parameter below. A tuple, not a dict: order here is the
+# order a caller who omits `columns` gets, and the order an invalid-column
+# error message lists them in.
+CASE_EXPORT_COLUMNS = (
+    "case_number", "title", "state", "district", "village", "project",
+    "stage", "status", "opened_on", "stage_changed_on", "days_in_stage",
+    "stage_due_on", "days_remaining", "timeline_status",
+    "parcel_count", "total_area_ha",
+)
+
+
+def _parse_columns(requested: str | None, allowed: tuple[str, ...]) -> list[str]:
+    """A caller-chosen subset and order of an export's columns — the actual
+    customisation Reports.jsx's own comment says "customisable MIS reports"
+    is otherwise missing. Never free text: every name is checked against
+    the fixed tuple the caller passes in, so this can only select and
+    reorder columns the export already computes, never name an arbitrary
+    field or touch the query that produced the rows.
+    """
+    if not requested:
+        return list(allowed)
+    selected = [c.strip() for c in requested.split(",") if c.strip()]
+    invalid = [c for c in selected if c not in allowed]
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown column(s): {', '.join(invalid)}. Valid columns: {', '.join(allowed)}",
+        )
+    if not selected:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="columns cannot be empty")
+    return selected
+
+
 @router.get("/cases.csv")
 def export_cases(
     db: Session = Depends(get_db),
@@ -131,8 +166,18 @@ def export_cases(
     project_id: int | None = None,
     stage: Stage | None = None,
     case_status: CaseStatus | None = None,
+    columns: str | None = Query(
+        default=None,
+        description=(
+            "Comma-separated subset of the register's columns, in the order to "
+            "emit them — e.g. 'case_number,stage,timeline_status'. Omit for all "
+            f"columns in their default order: {', '.join(CASE_EXPORT_COLUMNS)}."
+        ),
+    ),
 ):
     """The case register, with timeline position on every row."""
+    selected_columns = _parse_columns(columns, CASE_EXPORT_COLUMNS)
+
     query = _scoped_cases(db, user, state_id, district_id, project_id, stage, case_status)
     rows = query.limit(MAX_EXPORT_ROWS + 1).all()
     if len(rows) > MAX_EXPORT_ROWS:
@@ -169,44 +214,41 @@ def export_cases(
         for case, district_name, village_name, project_name, state_name in rows:
             parcel_count, area = totals.get(case.id, (0, 0.0))
             status_value = sla.timeline_status(case.stage_due_on, case.stage, today, sla_table)
-            yield [
-                case.case_number,
-                case.title,
-                state_name,
-                district_name,
-                village_name,
-                project_name,
-                case.stage.value,
-                case.status.value,
-                case.created_at.isoformat(),
-                case.stage_changed_at.isoformat(),
-                (today - case.stage_changed_at).days,
-                case.stage_due_on.isoformat() if case.stage_due_on else "",
-                sla.days_remaining(case.stage_due_on, today) if case.stage_due_on else "",
-                status_value.value,
-                parcel_count,
-                area,
-            ]
+            values = {
+                "case_number": case.case_number,
+                "title": case.title,
+                "state": state_name,
+                "district": district_name,
+                "village": village_name,
+                "project": project_name,
+                "stage": case.stage.value,
+                "status": case.status.value,
+                "opened_on": case.created_at.isoformat(),
+                "stage_changed_on": case.stage_changed_at.isoformat(),
+                "days_in_stage": (today - case.stage_changed_at).days,
+                "stage_due_on": case.stage_due_on.isoformat() if case.stage_due_on else "",
+                "days_remaining": (
+                    sla.days_remaining(case.stage_due_on, today) if case.stage_due_on else ""
+                ),
+                "timeline_status": status_value.value,
+                "parcel_count": parcel_count,
+                "total_area_ha": area,
+            }
+            yield [values[c] for c in selected_columns]
 
     audit.record(
         db,
         user,
         action="export.cases",
         entity_type="case",
-        detail=f"{len(rows)} rows (state={state_id} district={district_id} stage={stage})",
+        detail=(
+            f"{len(rows)} rows (state={state_id} district={district_id} stage={stage}) "
+            f"columns={','.join(selected_columns)}"
+        ),
     )
     db.commit()
 
-    return _csv_response(
-        f"cases_{today.isoformat()}.csv",
-        [
-            "case_number", "title", "state", "district", "village", "project",
-            "stage", "status", "opened_on", "stage_changed_on", "days_in_stage",
-            "stage_due_on", "days_remaining", "timeline_status",
-            "parcel_count", "total_area_ha",
-        ],
-        generate(),
-    )
+    return _csv_response(f"cases_{today.isoformat()}.csv", selected_columns, generate())
 
 
 @router.get("/compensation.csv")
@@ -477,3 +519,51 @@ def export_kpis(
     db.commit()
 
     return _csv_response(f"mis_{group_by}_{today.isoformat()}.csv", header, generate())
+
+
+@router.get("/trends.csv")
+def export_trends(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+    months: int = Query(default=12, ge=1, le=36),
+    state_id: int | None = None,
+    district_id: int | None = None,
+):
+    """The dashboard's trend chart as rows — the "trend analysis" the
+    statement names, computed once in dashboard.dashboard_trends and reused
+    here rather than re-derived, so a figure on the chart and a figure in
+    this file can never disagree about what a month counted.
+    """
+    series = dashboard_trends(
+        db=db, user=user, months=months, state_id=state_id, district_id=district_id
+    )
+
+    def generate():
+        for point in series.points:
+            yield [
+                point.period,
+                point.cases_opened,
+                point.cases_closed,
+                point.stage_transitions,
+                point.notices_issued,
+                point.compensation_paid,
+                point.area_acquired_ha,
+            ]
+
+    audit.record(
+        db,
+        user,
+        action="export.trends",
+        entity_type="dashboard",
+        detail=f"months={months} state={state_id} district={district_id}",
+    )
+    db.commit()
+
+    return _csv_response(
+        f"trends_{date.today().isoformat()}.csv",
+        [
+            "month", "cases_opened", "cases_closed", "stage_transitions",
+            "notices_issued", "compensation_paid", "area_acquired_ha",
+        ],
+        generate(),
+    )
