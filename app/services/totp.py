@@ -1,9 +1,9 @@
 """Authenticator-app (TOTP, RFC 6238) enrollment and verification.
 
 A second factor for password login, layered on top of it the same way
-face and fingerprint sit above password in the sign-in precedence order:
-password proves you know the credential, this proves you also hold the
-device it was set up on.
+face sits above password in the sign-in precedence order: password proves
+you know the credential, this proves you also hold the device it was set
+up on.
 
 **FALLBACK_CODE is a deliberate, temporary product decision, not a bug.**
 Every seeded account (admin, dc.bengaluru, ...) predates this feature and

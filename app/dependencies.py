@@ -79,7 +79,7 @@ def require_stepup(
 ) -> None:
     """Gate for an action that ALWAYS needs a fresh biometric
     re-confirmation, not a login — see app.routers.biometrics' /face/stepup
-    and /fingerprint/stepup/* endpoints for how X-Stepup-Token is minted."""
+    endpoint for how X-Stepup-Token is minted."""
     verify_stepup(x_stepup_token, user)
 
 

@@ -22,11 +22,11 @@ from PIL import Image, UnidentifiedImageError
 ALGORITHM = "face_recognition_dlib_resnet_v1"
 
 # face_recognition's own documented default is 0.6. This system uses a
-# tighter 0.5: the cost of a false reject here is someone falling back to
-# fingerprint or a password, which they can always do; the cost of a false
-# accept is a stranger opening an officer's account over a case with real
-# people's compensation in it. Erring toward more rejects is the cheaper
-# mistake by a wide margin.
+# tighter 0.5: the cost of a false reject here is someone falling back to a
+# password, which they can always do; the cost of a false accept is a
+# stranger opening an officer's account over a case with real people's
+# compensation in it. Erring toward more rejects is the cheaper mistake by
+# a wide margin.
 MATCH_THRESHOLD = 0.5
 
 # More than this many pixels on the long edge is discarded before face

@@ -1270,18 +1270,11 @@ class BiometricCredential(Base):
     below enforces that at the database rather than trusting every caller
     to check first.
 
-    `template` holds two different shapes depending on `kind`, and neither
-    is human-legible:
-    - FACE: a JSON-encoded 128-float face_recognition embedding. Never the
-      photo itself — the image is discarded the moment the embedding is
-      computed, both at enrollment and at every login attempt, so a
-      database read yields a vector matching algorithms need and nothing
-      a person could look at.
-    - FINGERPRINT: a base64 ANSI-378/ISO-19794-2 template as the Mantra
-      MFS100 SDK's non-Aadhaar capture mode returns it. This is already
-      what the device's own certified matcher (MFS100MatchISO) expects, so
-      the kiosk agent that enrolled it is also the only thing that ever
-      needs to read it back — see app.services.kiosk_auth.
+    `template` is a JSON-encoded 128-float face_recognition embedding.
+    Never the photo itself — the image is discarded the moment the
+    embedding is computed, both at enrollment and at every login attempt,
+    so a database read yields a vector matching algorithms need and
+    nothing a person could look at.
     """
 
     __tablename__ = "biometric_credentials"
@@ -1292,9 +1285,9 @@ class BiometricCredential(Base):
         _enum(BiometricKind, "biometric_kind"), nullable=False
     )
     template: Mapped[str] = mapped_column(Text, nullable=False)
-    # e.g. "face_recognition_dlib_resnet_v1" or "mfs100_ansi378". Recorded so
-    # a future change of matching algorithm can tell which rows it can
-    # actually compare against and which need re-enrollment.
+    # e.g. "face_recognition_dlib_resnet_v1". Recorded so a future change of
+    # matching algorithm can tell which rows it can actually compare against
+    # and which need re-enrollment.
     algorithm: Mapped[str] = mapped_column(String(60), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(
@@ -1317,100 +1310,3 @@ Index(
 )
 
 
-class KioskAgent(Base):
-    """A registered fingerprint kiosk: one Mantra MFS100 scanner, one PC,
-    one small local agent process (see docs/ or the mantra-agent/ folder at
-    the repo root) that the officer login screen's fingerprint fallback
-    talks to.
-
-    Selector/verifier split, identical in shape to InviteCode above and for
-    the same reason: the agent's API key is the only thing standing between
-    "a kiosk that ran a real MFS100 capture and match" and "a script that
-    claims a match happened" (see FingerprintChallenge), so it is stored
-    hashed and the plaintext exists exactly once, in the response to
-    whoever registered the kiosk.
-    """
-
-    __tablename__ = "kiosk_agents"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    selector: Mapped[str] = mapped_column(String(16), nullable=False, unique=True, index=True)
-    secret_hash: Mapped[str] = mapped_column(String(255), nullable=False)
-    # A human label for the admin screen — "DC Office Bengaluru, Counter 1"
-    # — not used for anything the backend decides.
-    label: Mapped[str] = mapped_column(String(120), nullable=False)
-    district_id: Mapped[int | None] = mapped_column(ForeignKey("districts.id"), nullable=True)
-    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-    last_used_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-
-    district: Mapped["District | None"] = relationship()
-
-
-class FingerprintChallenge(Base):
-    """One outstanding fingerprint login attempt.
-
-    Minted when a kiosk agent fetches the claimed user's enrolled template
-    (POST /biometrics/fingerprint/challenge) and consumed by the matching
-    POST /biometrics/fingerprint/login within `expires_at`. This is what
-    stops a kiosk's API key alone from being enough to mint a session for
-    any username on request: the agent must also present a nonce this
-    server minted for that exact (kiosk, user) pair, tying "a template was
-    handed out" to "a login was granted" into one round trip a stolen key
-    cannot replay after the fact, and cannot use for a user it never
-    fetched a template for.
-    """
-
-    __tablename__ = "fingerprint_challenges"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    kiosk_agent_id: Mapped[int] = mapped_column(
-        ForeignKey("kiosk_agents.id"), nullable=False, index=True
-    )
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
-    nonce: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-
-    kiosk_agent: Mapped["KioskAgent"] = relationship()
-    user: Mapped["User"] = relationship()
-
-
-class StepUpChallenge(Base):
-    """One outstanding fingerprint step-up confirmation.
-
-    The same nonce/consume shape as FingerprintChallenge above, but for
-    re-confirming an already signed-in officer's identity before one
-    high-impact action, never for logging in — see
-    app.routers.biometrics' /fingerprint/stepup/start and /report, and
-    app.dependencies.verify_stepup for how the resulting token is checked.
-
-    Kept as its own table rather than reusing FingerprintChallenge: that
-    table's kiosk_agent_id is meaningfully NOT NULL there, because a login
-    attempt's kiosk fetches the challenge itself and so is known from the
-    start. Here the already-authenticated browser starts the challenge
-    before any kiosk is involved — it already knows who is asking — so
-    which kiosk eventually reports the match has to stay optional until it
-    does.
-    """
-
-    __tablename__ = "step_up_challenges"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False, index=True)
-    nonce: Mapped[str] = mapped_column(String(64), nullable=False, unique=True, index=True)
-    kiosk_agent_id: Mapped[int | None] = mapped_column(ForeignKey("kiosk_agents.id"), nullable=True)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    consumed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-
-    user: Mapped["User"] = relationship()
-    kiosk_agent: Mapped["KioskAgent | None"] = relationship()

@@ -333,12 +333,5 @@ class DiscrepancyStatus(str, Enum):
 
 
 class BiometricKind(str, Enum):
-    """Which factor a stored biometric credential or a login attempt is.
-
-    Face is available to every account. Fingerprint is not — it depends on
-    a physical Mantra MFS100 scanner and only ever succeeds from a kiosk
-    that has one attached, so it is offered as a fallback, never the
-    default, and only where app.services.kiosk_auth has already verified
-    the caller is a real registered kiosk."""
+    """Which factor a stored biometric credential or a login attempt is."""
     FACE = "face"
-    FINGERPRINT = "fingerprint"
