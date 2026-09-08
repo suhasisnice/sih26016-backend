@@ -18,7 +18,7 @@ from app.dependencies import get_current_user, get_db, require_role, scope_cases
 from app.integrations import available_providers, get_provider
 from app.integrations.base import LandRecordNotFound, LandRecordUnavailable
 from app.integrations.providers import configured_key
-from app.models import Case, User
+from app.models import Case, User, Village
 from app.schemas.integration import (
     ProviderList,
     ProviderOut,

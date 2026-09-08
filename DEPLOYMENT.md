@@ -223,13 +223,22 @@ while `/health` is fine, it is `FRONTEND_ORIGIN` (CORS) or `VITE_API_URL`
 These are known and deliberate, not oversights. Each is something to decide
 about rather than something to discover at 2am.
 
-**No migrations.** The app calls `create_all()` at boot, which only ever
-*adds* missing tables. It cannot alter a table whose columns changed. So
-after a model change the deployed database keeps its old shape, and the
-first query against the changed column fails. Today the only way out is
-`--rebuild`, which destroys the data. That is acceptable while the data is
-generated demo data and stops being acceptable the moment it is not — at
-which point this needs Alembic before the next schema change, not after it.
+**Migrations run automatically on every deploy.** The Dockerfile's `CMD` is
+`alembic upgrade head && exec uvicorn ...` — a schema change, including a
+column type change or a table drop, ships by adding a new file under
+`alembic/versions/` (never editing an existing one) and pushing; Render
+runs it before the API starts serving, and a failed migration fails the
+deploy instead of serving 500s against a half-migrated schema. `main.py`
+also calls `create_all()` in its lifespan hook, but that runs *after*
+Alembic and only ever adds tables Alembic doesn't yet know about, so it
+never masks a migration that should have run.
+
+The one place `create_all()` is still load-bearing on its own is the
+**seed script**, run by hand against a target database
+(`python -m app.ai_layer.seed [--allow-remote] [--rebuild]`, see §2 above)
+— `--rebuild` drops every table and calls `create_all()` itself rather
+than going through Alembic, which is fine for demo data and would not be
+for anything else.
 
 **Uploads are ephemeral.** Documents are written to `/app/uploads` inside
 the container. On Render's free plan that filesystem is discarded on every

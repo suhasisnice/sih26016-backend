@@ -9,7 +9,7 @@ MONITORING stage) five years after possession is the honest proxy: it
 means nobody has recorded the acquisition as wrapped up.
 """
 
-from datetime import date
+from datetime import date, timedelta
 
 RULE = "unused_land"
 

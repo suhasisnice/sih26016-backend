@@ -36,9 +36,9 @@ class AdminUserList(BaseModel):
 
 class ResetPasswordResponse(BaseModel):
     """The new password exists in readable form exactly once — this
-    response — the same rule invite codes and kiosk keys follow. It is
-    never stored anywhere but hashed, so if this is lost the only recovery
-    is to reset again."""
+    response — the same rule invite codes follow. It is never stored
+    anywhere but hashed, so if this is lost the only recovery is to reset
+    again."""
 
     username: str
     temporary_password: str

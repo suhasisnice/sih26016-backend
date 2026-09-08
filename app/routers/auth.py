@@ -75,7 +75,7 @@ def login(
 
     # The password guess surface is resolved here — clearing it now, not
     # after the code step, matches how this limiter already treats face
-    # and fingerprint as separate surfaces from the password itself.
+    # login as a separate surface from the password itself.
     ratelimit.clear(request)
 
     # No access token yet. Every password login now needs the code step at
@@ -94,7 +94,7 @@ def verify_login_code(
 ):
     """The second step: redeem an mfa_token plus the code it asked for.
 
-    Same limiter as the password step and as face/fingerprint login — a
+    Same limiter as the password step and as face login — a
     guess at this 6-digit code (or, for an unenrolled account, at the
     fixed fallback in app.services.totp) is exactly as attackable and
     costs the same to defend.
