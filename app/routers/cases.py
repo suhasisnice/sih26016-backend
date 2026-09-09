@@ -22,6 +22,7 @@ from app.models import (
     District,
     Document,
     FundDeposit,
+    Grievance,
     Objection,
     Parcel,
     Person,
@@ -407,13 +408,14 @@ def case_audit_trail(
     case, which is not something a landowner needs in order to follow their
     own acquisition.
 
-    Covers the case itself plus the documents and objections attached to
-    it, so the page reads as one history rather than three.
+    Covers the case itself plus the documents, objections and grievances
+    attached to it, so the page reads as one history rather than four.
     """
     _get_visible_case(db, user, case_id)
 
     document_ids = [d for (d,) in db.query(Document.id).filter(Document.case_id == case_id).all()]
     objection_ids = [o for (o,) in db.query(Objection.id).filter(Objection.case_id == case_id).all()]
+    grievance_ids = [g for (g,) in db.query(Grievance.id).filter(Grievance.case_id == case_id).all()]
 
     conditions = [(AuditLog.entity_type == "case") & (AuditLog.entity_id == case_id)]
     if document_ids:
@@ -423,6 +425,10 @@ def case_audit_trail(
     if objection_ids:
         conditions.append(
             (AuditLog.entity_type == "objection") & (AuditLog.entity_id.in_(objection_ids))
+        )
+    if grievance_ids:
+        conditions.append(
+            (AuditLog.entity_type == "grievance") & (AuditLog.entity_id.in_(grievance_ids))
         )
 
     query = (
