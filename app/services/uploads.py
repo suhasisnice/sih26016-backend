@@ -20,9 +20,16 @@ window where the bytes hashed are not the bytes written.
 import hashlib
 import uuid
 from dataclasses import dataclass
+from datetime import date
+from io import BytesIO
 from pathlib import Path
 
 from fastapi import HTTPException, UploadFile, status
+from reportlab.lib import colors
+from reportlab.lib.pagesizes import LETTER
+from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.units import inch
+from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer
 
 from app.config import settings
 
@@ -92,3 +99,58 @@ async def save_upload_file(file: UploadFile, allowed_content_types: dict[str, st
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Uploaded file is empty")
 
     return UploadedFile(stored_name=stored_name, size_bytes=written, sha256_hex=digest.hexdigest())
+
+
+def write_seed_placeholder_pdf(
+    stored_name: str, *, case_number: str, doc_type_label: str, doc_date: date
+) -> UploadedFile:
+    """Write a small, honestly-labelled placeholder PDF for a seeded
+    Document row, so "Download" on a demo case returns a real file instead
+    of a 404 for a stored_name that was only ever written to the row.
+
+    `stored_name` must be a flat filename with no path separators — same
+    rule save_upload_file's generated uuid names already satisfy, and the
+    one the download route's own traversal guard (path.parent != upload_dir)
+    depends on. Callers pick the name; this does not invent one, because a
+    backfill script needs a deterministic name to write the same file
+    twice without duplicating it.
+    """
+    if "/" in stored_name or "\\" in stored_name:
+        raise ValueError(f"stored_name must be flat, got {stored_name!r}")
+
+    upload_dir = Path(settings.upload_dir).resolve()
+    upload_dir.mkdir(parents=True, exist_ok=True)
+    destination = (upload_dir / stored_name).resolve()
+    if destination.parent != upload_dir:
+        raise ValueError(f"stored_name must resolve inside the upload directory, got {stored_name!r}")
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=LETTER, topMargin=1 * inch, bottomMargin=1 * inch)
+    ink = colors.HexColor("#1F2A24")
+    ink_soft = colors.HexColor("#4A5247")
+    title_style = ParagraphStyle("title", fontName="Helvetica-Bold", fontSize=16, textColor=ink, spaceAfter=14)
+    body_style = ParagraphStyle("body", fontName="Helvetica", fontSize=11, leading=16, textColor=ink)
+    notice_style = ParagraphStyle(
+        "notice", fontName="Helvetica-Oblique", fontSize=9.5, leading=14, textColor=ink_soft, spaceBefore=24
+    )
+    story = [
+        Paragraph(doc_type_label, title_style),
+        Paragraph(f"Case: {case_number}", body_style),
+        Paragraph(f"Date on file: {doc_date.strftime('%d %B %Y')}", body_style),
+        Spacer(1, 20),
+        Paragraph(
+            "This is a synthetic placeholder document generated for this prototype's demonstration "
+            "data. It stands in for the real instrument a case of this kind would carry on file and "
+            "carries no legal or evidentiary weight.",
+            notice_style,
+        ),
+    ]
+    doc.build(story)
+    content = buffer.getvalue()
+
+    destination.write_bytes(content)
+    return UploadedFile(
+        stored_name=stored_name,
+        size_bytes=len(content),
+        sha256_hex=hashlib.sha256(content).hexdigest(),
+    )
