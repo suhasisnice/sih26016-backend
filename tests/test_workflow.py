@@ -161,3 +161,51 @@ def test_advance_case_closes_the_case_at_the_terminal_stage(db, make_case, make_
 
     assert case.stage is workflow.TERMINAL_STAGE
     assert case.status is CaseStatus.CLOSED
+
+
+# ---------------------------------------------------------------------
+# can_advance — who may push a case out of its CURRENT stage. Admin,
+# District Officer and SLAO administer a case end to end; a Field Officer
+# or R&R Officer may only act on the one stage that is actually theirs, per
+# STAGE_RESPONSIBLE_ROLE. This is the exact permission POST
+# /cases/{id}/advance checks, and what the frontend's Advance Stage button
+# mirrors, so a role that fails here would also 403 for real.
+# ---------------------------------------------------------------------
+
+
+def test_case_stage_owners_may_advance_any_stage(db, make_case, make_user):
+    case = make_case(stage=Stage.REHABILITATION_RESETTLEMENT)  # not their named stage
+    for role in (Role.ADMIN, Role.DISTRICT_OFFICER, Role.SLAO):
+        officer = make_user(role)
+        assert workflow.can_advance(officer, case) is True
+
+
+def test_rnr_officer_may_advance_only_at_the_rnr_stage(db, make_case, make_user):
+    rnr_officer = make_user(Role.RNR_OFFICER)
+
+    rnr_case = make_case(stage=Stage.REHABILITATION_RESETTLEMENT)
+    other_case = make_case(stage=Stage.AWARD)
+
+    assert workflow.can_advance(rnr_officer, rnr_case) is True
+    assert workflow.can_advance(rnr_officer, other_case) is False
+
+
+def test_field_officer_may_advance_only_at_their_named_stage(db, make_case, make_user):
+    """STAGE_RESPONSIBLE_ROLE names Field Officer for Land Verification
+    specifically — not for every stage FIELD_OFFICER_STAGES makes visible
+    to them (Social Impact Assessment and Objection Period are on-ground
+    work, not stages they formally advance)."""
+    field_officer = make_user(Role.FIELD_OFFICER)
+
+    verification_case = make_case(stage=Stage.LAND_VERIFICATION)
+    sia_case = make_case(stage=Stage.SOCIAL_IMPACT_ASSESSMENT)
+
+    assert workflow.can_advance(field_officer, verification_case) is True
+    assert workflow.can_advance(field_officer, sia_case) is False
+
+
+def test_landowner_may_never_advance_a_case(db, make_case, make_user):
+    landowner = make_user(Role.LANDOWNER, district_id=None)
+    case = make_case(stage=Stage.AWARD)
+
+    assert workflow.can_advance(landowner, case) is False
