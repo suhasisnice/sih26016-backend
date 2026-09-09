@@ -10,6 +10,7 @@ project holds a WhatsApp Business API or SMTP credential it does not have.
 import logging
 
 from app.integrations.messaging.base import MessagingUnavailable, ProviderInfo
+from app.integrations.messaging.push import send_push_notification
 
 # A deliberate, documented way to demonstrate the failure path in a demo
 # without a real provider ever actually failing — put "faildemo" anywhere
@@ -54,3 +55,8 @@ class MockMessagingProvider:
             logger.info("[MOCK EMAIL] to=%s FAILED (simulated)", to)
             raise MessagingUnavailable("Simulated email failure for testing.")
         logger.info("[MOCK EMAIL] to=%s subject=%r body=%r", to, subject, body)
+
+    def send_push(self, subscription_json: str, title: str, body: str) -> None:
+        # Genuinely sends — see push.py's module docstring for why there is
+        # no simulated version of this one channel.
+        send_push_notification(subscription_json, title, body)

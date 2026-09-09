@@ -43,3 +43,12 @@ class MessagingProvider(Protocol):
     def send_email(self, to: str, subject: str, body: str) -> None:
         """Raises MessagingUnavailable if the provider could not send it."""
         ...
+
+    def send_push(self, subscription_json: str, title: str, body: str) -> None:
+        """subscription_json is the browser's own serialised PushSubscription
+        (NotificationSubscription.push_subscription) — opaque here, passed
+        straight to the provider. Raises MessagingUnavailable if the
+        provider could not send it, including a subscription the browser
+        has since revoked (410 Gone is the push service's normal way of
+        saying so, not a transient failure)."""
+        ...

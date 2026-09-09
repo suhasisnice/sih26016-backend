@@ -25,6 +25,7 @@ from twilio.rest import Client
 
 from app.config import settings
 from app.integrations.messaging.base import MessagingUnavailable, ProviderInfo
+from app.integrations.messaging.push import send_push_notification
 
 logger = logging.getLogger("bhoomimitra.messaging")
 
@@ -107,3 +108,8 @@ class LiveMessagingProvider:
         except (smtplib.SMTPException, OSError) as exc:
             logger.warning("[SMTP EMAIL] to=%s failed: %s", to, exc)
             raise MessagingUnavailable(str(exc)) from exc
+
+    def send_push(self, subscription_json: str, title: str, body: str) -> None:
+        # Same call as MockMessagingProvider.send_push — see push.py's
+        # module docstring for why this one channel has no mock/live split.
+        send_push_notification(subscription_json, title, body)

@@ -1,5 +1,6 @@
 """notifyLandowner — the one place a message actually goes out to a citizen
-who subscribed on the public Notices page, over SMS, email, or both.
+who subscribed on the public Notices page, over SMS, email, browser push,
+or any mix of the three.
 
 SMS over WhatsApp: WhatsApp needed a recipient to have first messaged the
 Twilio sandbox number (or, in production, opted into a WhatsApp Business
@@ -17,6 +18,7 @@ whether a channel is mocked; that's this file's job and
 app.integrations.messaging's.
 """
 
+import json
 from datetime import date
 
 from sqlalchemy.orm import Session
@@ -102,6 +104,23 @@ def notify_landowner(
                     send=lambda to: provider.send_email(to, subject, body),
                 )
             )
+        if subscription.push_subscription:
+            # NotificationLog.recipient is String(255); a real push endpoint
+            # URL can run past that on some browsers, so this stores a short
+            # identifying tail of the endpoint rather than the full
+            # subscription — enough to tell one subscription's log rows
+            # apart from another's.
+            endpoint = json.loads(subscription.push_subscription).get("endpoint", "")
+            recipient_label = f"browser:…{endpoint[-40:]}"
+            logs.append(
+                _send_one(
+                    db, provider, parcel, NotificationChannel.PUSH,
+                    recipient_label, notification_type,
+                    send=lambda to, sub=subscription.push_subscription: provider.send_push(
+                        sub, subject, body
+                    ),
+                )
+            )
 
     db.flush()
     return logs
@@ -114,13 +133,20 @@ def _send_one(db, provider, parcel, channel, recipient, notification_type, *, se
     except messaging.MessagingUnavailable:
         status = NotificationLogStatus.FAILED
 
+    # Push is the one channel that genuinely sends regardless of
+    # provider.info.is_live — see messaging/push.py's docstring for why
+    # there is no simulated version of it. Deriving is_mock from the
+    # provider alone would mislabel a real push as "not actually
+    # delivered" whenever SMS/email are still mocked.
+    is_mock = False if channel is NotificationChannel.PUSH else not provider.info.is_live
+
     log = NotificationLog(
         parcel_id=parcel.id,
         channel=channel,
         notification_type=notification_type,
         recipient=recipient,
         status=status,
-        is_mock=not provider.info.is_live,
+        is_mock=is_mock,
     )
     db.add(log)
     return log

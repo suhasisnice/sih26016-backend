@@ -8,6 +8,15 @@ DEV_SECRET_KEY = "dev-only-insecure-key-set-SECRET_KEY-before-any-shared-deploym
 # SECRET_KEY is.
 DEV_ENCRYPTION_KEY = "3mMvGVbPVYmcGGVjsUw4-opIrxxCRaKwyYi3fRd1STE="
 
+# A real VAPID (RFC 8292) keypair for the push notification channel,
+# committed in the clear for the same reason as the two above: unlike a
+# Twilio credential, there is no vendor account behind this to be misused —
+# it only lets its holder sign push messages as this app to whoever has
+# subscribed. `docker compose up` works with push out of the box; set a
+# deployment's own pair in production the same way SECRET_KEY is.
+DEV_VAPID_PRIVATE_KEY = "yMkRYUMaZ3ZzysLAfNt9XEacBzOzhsf3NyIvEwQAwuo"
+DEV_VAPID_PUBLIC_KEY = "BIdB0ByQ1rpVn0IiuSl5eia629Wcqbrx0EOlcBzFnoi6ZV9ydFOMvwfWSdAGhh60DDyrQdQjav3bmq4zb79eDGw"
+
 
 class Settings(BaseSettings):
     environment: str = "development"
@@ -48,6 +57,15 @@ class Settings(BaseSettings):
     # anymore; kept for the one Twilio account to cover both channels
     # without a second vendor integration.
     twilio_whatsapp_from: str = ""
+
+    # Web Push — read regardless of notification_provider, since VAPID has
+    # no "mock vs live" account distinction to switch on: it either signs
+    # correctly or it doesn't. vapid_claims_email is the "sub" claim RFC
+    # 8292 requires — browser push services use it to contact the sender if
+    # something's misbehaving; any real mailbox works.
+    vapid_private_key: str = DEV_VAPID_PRIVATE_KEY
+    vapid_public_key: str = DEV_VAPID_PUBLIC_KEY
+    vapid_claims_email: str = "admin@bhoomimitra.gov.in"
 
     # SMTP email — used only when notification_provider="live".
     smtp_host: str = ""

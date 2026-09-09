@@ -54,10 +54,16 @@ Pillow==12.3.0
 pyotp==2.9.0
 qrcode==8.0
 
-# Live WhatsApp delivery for NOTIFICATION_PROVIDER=live — see
+# Live SMS delivery for NOTIFICATION_PROVIDER=live — see
 # app/integrations/messaging/live.py. Email on that same provider uses
 # smtplib from the standard library, so it adds no dependency of its own.
 twilio==9.11.0
+
+# Web Push (VAPID) for the push notification channel — see
+# app/integrations/messaging/live.py's send_push and app/services/push.py.
+# No vendor account: VAPID is a self-generated keypair, not a third-party
+# credential, so this channel has none of SMS's trial/DLT gating.
+pywebpush==2.0.3
 
 # At-rest encryption for TOTP secrets and biometric templates — see
 # app/services/crypto.py. Not a transitive dependency of anything else

@@ -173,6 +173,7 @@ class NotificationChannel(str, Enum):
     EMAIL = "email"
     SMS = "sms"
     WHATSAPP = "whatsapp"
+    PUSH = "push"
 
 
 class NotificationLogStatus(str, Enum):
