@@ -29,6 +29,7 @@ def send_push_notification(subscription_json: str, title: str, body: str) -> Non
     except (TypeError, ValueError) as exc:
         raise MessagingUnavailable("Stored push subscription is not valid JSON.") from exc
 
+    endpoint = subscription_info.get("endpoint", "")
     try:
         webpush(
             subscription_info=subscription_info,
@@ -43,6 +44,21 @@ def send_push_notification(subscription_json: str, title: str, body: str) -> Non
         # same as any other MessagingUnavailable; app.services.landowner_notify
         # already logs every attempt, so a dead subscription shows up in
         # NotificationLog rather than silently vanishing.
+        #
+        # Logs the response body too, temporarily verbose while diagnosing
+        # a real failure — push services (FCM/Mozilla/Apple) put the actual
+        # reason there; the bare status code alone isn't enough to tell
+        # "wrong VAPID key for this subscription" apart from "subscription
+        # genuinely expired" apart from "malformed request".
         status = getattr(exc.response, "status_code", None)
-        logger.warning("[WEB PUSH] failed (status=%s): %s", status, exc)
+        body_text = None
+        if exc.response is not None:
+            try:
+                body_text = exc.response.text
+            except Exception:
+                body_text = None
+        logger.warning(
+            "[WEB PUSH] failed (status=%s) endpoint=%s body=%r: %s",
+            status, endpoint[:60], body_text, exc,
+        )
         raise MessagingUnavailable(str(exc)) from exc
