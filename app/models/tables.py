@@ -44,6 +44,9 @@ from app.core.enums import (
     DiscrepancyType,
     DocType,
     DocumentVerificationStatus,
+    GrievanceCategory,
+    GrievanceContactMethod,
+    GrievanceStatus,
     LandUseType,
     MutationStatus,
     NoticeType,
@@ -867,6 +870,93 @@ class SurveyDiscrepancy(Base):
 
     survey_task: Mapped[SurveyTask] = relationship()
     case: Mapped[Case] = relationship()
+
+
+class Grievance(Base):
+    """A landowner's complaint about their own case, service, or record —
+    deliberately NOT the same thing as Objection.
+
+    Objection is the Act's own Sec. 15 step: it exists only during the
+    objection period, blocks the declaration until answered, and is
+    tracked as part of the statutory workflow. A Grievance is everything
+    else a citizen may need to raise at any stage of their case —
+    compensation concerns, a wrong survey number, a missing document, a
+    processing delay, an R&R issue — modelled as its own record so it never
+    gets confused with, or silently merged into, the objection machinery.
+
+    grievance_number is the citizen-facing identifier (GRV-2026-00418),
+    minted the same way case_number and proposal_number are — see
+    app.services.numbering.next_grievance_number.
+    """
+
+    __tablename__ = "grievances"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    grievance_number: Mapped[str] = mapped_column(String(30), nullable=False, unique=True, index=True)
+    case_id: Mapped[int] = mapped_column(ForeignKey("cases.id"), nullable=False, index=True)
+    # The affected person this grievance is filed for — resolved the same
+    # way Objection.person_id is: the filer's own account for a landowner,
+    # or named explicitly when an officer records one on someone's behalf.
+    person_id: Mapped[int] = mapped_column(ForeignKey("people.id"), nullable=False, index=True)
+    filed_by_user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
+    category: Mapped[GrievanceCategory] = mapped_column(
+        _enum(GrievanceCategory, "grievance_category"), nullable=False
+    )
+    subject: Mapped[str] = mapped_column(String(200), nullable=False)
+    description: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[GrievanceStatus] = mapped_column(
+        _enum(GrievanceStatus, "grievance_status"), nullable=False, default=GrievanceStatus.SUBMITTED
+    )
+    preferred_contact_method: Mapped[GrievanceContactMethod] = mapped_column(
+        _enum(GrievanceContactMethod, "grievance_contact_method"),
+        nullable=False,
+        default=GrievanceContactMethod.SMS,
+    )
+    filed_on: Mapped[date] = mapped_column(Date, nullable=False)
+    # A response is the officer's written answer, distinct from the status
+    # transition that carries it — same split Objection makes between
+    # `status` and `response`.
+    response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    responded_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    responded_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+
+    # An optional piece of evidence the filer attaches — not modelled as a
+    # row in `documents`: that table is the case's own statutory record
+    # (gazette copies, survey maps, award papers), reviewed by officers
+    # under DOCUMENT_VERIFIERS. A grievance attachment is the filer's own
+    # supporting evidence for their complaint, and a landowner is not a
+    # DOCUMENT_UPLOADER — this keeps that boundary intact while still
+    # letting them attach a file, saved through the same
+    # app.services.uploads.save_upload_file every other upload uses.
+    attachment_stored_name: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    attachment_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    attachment_content_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    attachment_size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    attachment_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    case: Mapped[Case] = relationship()
+    person: Mapped[Person] = relationship()
+
+
+class GrievanceStatusHistory(Base):
+    """Append-only record of every status change on a grievance — the same
+    role CaseStageHistory plays for a case's stage, so "Grievance details"
+    can draw a real timeline instead of inferring one from a single current
+    status."""
+
+    __tablename__ = "grievance_status_history"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    grievance_id: Mapped[int] = mapped_column(ForeignKey("grievances.id"), nullable=False, index=True)
+    from_status: Mapped[GrievanceStatus | None] = mapped_column(
+        _enum(GrievanceStatus, "grievance_status"), nullable=True
+    )
+    to_status: Mapped[GrievanceStatus] = mapped_column(
+        _enum(GrievanceStatus, "grievance_status"), nullable=False
+    )
+    changed_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    changed_on: Mapped[date] = mapped_column(Date, nullable=False)
+    note: Mapped[str | None] = mapped_column(String(500), nullable=True)
 
 
 class Alert(Base):

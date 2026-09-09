@@ -48,8 +48,10 @@ from app.services import audit, case_report, notify, numbering, provenance, sla,
 router = APIRouter(prefix="/cases", tags=["cases"])
 
 # Roles allowed to create a case or move one along. A landowner is not one
-# of them: they may see and object, not administer.
-CASE_WRITERS = (Role.ADMIN, Role.DISTRICT_OFFICER, Role.SLAO)
+# of them: they may see and object, not administer. Sourced from workflow
+# rather than redefined here, so this list and workflow.can_advance's own
+# notion of "administers the whole case" cannot drift apart.
+CASE_WRITERS = workflow.CASE_STAGE_OWNERS
 
 # The audit trail names which officers acted on a case — useful to other
 # officers, not something a landowner needs to follow their own acquisition.
@@ -307,7 +309,7 @@ def get_case_report(case_id: int, db: Session = Depends(get_db), user: User = De
     app.services.case_report for what each section is actually built
     from."""
     case = _get_visible_case(db, user, case_id)
-    pdf_bytes = case_report.build_case_report_pdf(db, case)
+    pdf_bytes = case_report.build_case_report_pdf(db, case, requesting_user=user)
 
     audit.record(
         db, user,
@@ -454,16 +456,26 @@ def advance_stage(
     case_id: int,
     payload: CaseStageAdvance,
     db: Session = Depends(get_db),
-    user: User = Depends(require_role(*CASE_WRITERS)),
+    user: User = Depends(get_current_user),
     x_stepup_token: str | None = Header(default=None),
 ):
     """Move a case to the next (or previous) legal stage.
 
     workflow.advance_case refuses anything the Act does not allow and
-    writes both the stage history and the audit entry. Two extra checks
-    live here rather than in workflow.advance_case, because both depend on
+    writes both the stage history and the audit entry. Three extra checks
+    live here rather than in workflow.advance_case, because each depends on
     *which* transition this is, not just that it is a legal one:
 
+    - Who may make it at all depends on the case's CURRENT stage, not just
+      the caller's role — a plain require_role(*CASE_WRITERS) dependency
+      resolves before case_id is even looked up, so it cannot ask "is this
+      case at a stage this officer owns". A Field Officer or R&R Officer is
+      not in CASE_WRITERS at all (they administer one stage each, not a
+      whole case), so they would 403 here on every case, at every stage,
+      including the one that is actually theirs — which is the bug this
+      check exists to fix. workflow.can_advance is the one place both this
+      route and (mirrored) the frontend's Advance Stage button answer that
+      question, so neither can drift from the other.
     - Moving backward is "send back for review" in every officer
       workspace's own language, and a send-back with no reason attached is
       not accountable to anyone reading the case history later.
@@ -475,6 +487,15 @@ def advance_stage(
       parsed cannot see.
     """
     case = _get_visible_case(db, user, case_id)
+
+    if not workflow.can_advance(user, case):
+        raise HTTPException(
+            status.HTTP_403_FORBIDDEN,
+            detail=(
+                f"Role '{user.role.value}' is not responsible for a case at stage "
+                f"'{case.stage.value}'"
+            ),
+        )
 
     is_send_back = workflow.STAGE_ORDER.index(payload.to_stage) < workflow.STAGE_ORDER.index(case.stage)
     if is_send_back and not (payload.note and payload.note.strip()):

@@ -10,8 +10,9 @@ from app.services import scheduler, sla, statutes
 from app.database import Base, SessionLocal, engine
 from app.routers import (
     admin, auth, biometrics, cases, dashboard, discrepancies, documents,
-    exports, integrations, meta, mfa, notices, notifications, objections,
-    parcels, persons, projects, proposals, public_records, reference, survey,
+    exports, grievances, integrations, meta, mfa, notices, notifications,
+    objections, parcels, persons, projects, proposals, public_records,
+    reference, survey,
 )
 
 
@@ -78,6 +79,7 @@ app.include_router(persons.compensation_router)
 app.include_router(persons.rnr_router)
 app.include_router(documents.router)
 app.include_router(objections.router)
+app.include_router(grievances.router)
 app.include_router(discrepancies.router)
 app.include_router(dashboard.router)
 app.include_router(notifications.router)

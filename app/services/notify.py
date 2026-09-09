@@ -302,3 +302,44 @@ def notify_objection_filer(
             landowner_notify.notify_account_holder_sms(db, parcel, person.phone, body)
 
     return True
+
+
+def notify_grievance_filer(
+    db: Session,
+    grievance,
+    case: Case,
+    title: str,
+    body: str,
+    severity: AlertSeverity = AlertSeverity.MEDIUM,
+) -> bool:
+    """Notify the landowner who raised a grievance that its status changed.
+
+    Same shape as notify_objection_filer above, and for the same reason: a
+    grievance is a citizen's own complaint, so a status change on it is
+    that person's news, not a case-wide broadcast. An officer recording one
+    on behalf of someone with no account is a no-op here, correctly.
+    """
+    filer = (
+        db.query(User)
+        .filter(
+            User.is_active.is_(True),
+            User.role == Role.LANDOWNER,
+            User.person_id == grievance.person_id,
+        )
+        .first()
+    )
+    if filer is None:
+        return False
+    notify_user(db, filer.id, title, body, severity=severity, case_id=case.id, rule=None)
+
+    person = db.get(Person, grievance.person_id)
+    if person and person.phone:
+        parcel = (
+            db.query(Parcel)
+            .filter(Parcel.case_id == case.id, Parcel.owner_id == person.id)
+            .first()
+        )
+        if parcel:
+            landowner_notify.notify_account_holder_sms(db, parcel, person.phone, body)
+
+    return True
