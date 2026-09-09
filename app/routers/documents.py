@@ -278,12 +278,20 @@ def download_document(
     disk — Render's free tier wipes the container filesystem on every
     deploy AND every wake-from-sleep (see DEPLOYMENT.md), so a file
     written once at seed time does not reliably survive to when someone
-    actually clicks Download. A seed placeholder's stored_name always
-    starts with "seed-" (see app.services.uploads.write_seed_placeholder_pdf
-    and the generator that calls it) and everything needed to rebuild an
+    actually clicks Download. A seed placeholder's stored_name starts
+    with "seed-" (see app.services.uploads.write_seed_placeholder_pdf and
+    the generator that calls it) and everything needed to rebuild an
     identical one — case number, document type, the date on file — is
     already on the row, so it is regenerated on the spot rather than
     404ing on data that was never really lost, just the disk under it.
+
+    A row seeded before that fix carries the OLD nested stored_name
+    (seed/<case>/<stage>-<n>.pdf), which can never pass the traversal
+    guard below at all, file present or not — those are migrated to a
+    flat name here too, on the first request that touches them, so an
+    already-seeded environment (Render's live database, notably) heals
+    itself without a separate backfill step.
+
     A genuinely uploaded file (an officer's real upload, a landowner's
     grievance attachment) has no such stand-in and still 404s if it is
     gone — that loss is real and this cannot paper over it.
@@ -296,18 +304,36 @@ def download_document(
     # document id must never be enough to read another district's file.
     case = _case_or_404(db, user, document.case_id)
 
+    stored_name = document.stored_name
+    is_seed_placeholder = stored_name.startswith("seed-")
+    if stored_name.startswith("seed/"):
+        # Pre-migration nested name — give it the same flat, deterministic
+        # name a fresh seed would use now, and treat it as a placeholder
+        # needing (re)generation regardless of whether a file happens to
+        # still sit at the old path; nothing serves from that path again.
+        stored_name = f"seed-{case.case_number.replace('/', '-')}-{document.doc_type.value}-{document.id}.pdf"
+        is_seed_placeholder = True
+
     upload_dir = Path(settings.upload_dir).resolve()
-    path = (upload_dir / document.stored_name).resolve()
+    path = (upload_dir / stored_name).resolve()
     if path.parent != upload_dir:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document file is not on disk")
 
+    # Persisted whenever a migration renamed this row, even if the flat
+    # path already had a file sitting at it (an earlier request, or an
+    # earlier backfill, already wrote one there) — otherwise the row keeps
+    # reporting the old nested name forever and every future request pays
+    # the same rename cost for nothing.
+    if stored_name != document.stored_name:
+        document.stored_name = stored_name
+
     if not path.is_file():
-        if not document.stored_name.startswith("seed-"):
+        if not is_seed_placeholder:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="Document file is not on disk"
             )
         saved = write_seed_placeholder_pdf(
-            document.stored_name,
+            stored_name,
             case_number=case.case_number,
             doc_type_label=document.doc_type.value.replace("_", " ").title(),
             doc_date=document.uploaded_on,
