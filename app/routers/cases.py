@@ -1,6 +1,6 @@
 from datetime import date
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from sqlalchemy import case as sql_case
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
@@ -42,7 +42,7 @@ from app.schemas import (
 )
 from app.schemas.audit import AuditEntryOut, AuditList
 from app.schemas.fund_deposit import FundDepositCreate, FundDepositList, FundDepositOut
-from app.services import audit, notify, numbering, provenance, sla, workflow
+from app.services import audit, case_report, notify, numbering, provenance, sla, workflow
 
 router = APIRouter(prefix="/cases", tags=["cases"])
 
@@ -274,6 +274,32 @@ def get_case(case_id: int, db: Session = Depends(get_db), user: User = Depends(g
         consent_given_count=consent_given,
         consent_obtained_pct=consent_pct,
         provenance=provenance.out(case),
+    )
+
+
+@router.get("/{case_id}/report.pdf")
+def get_case_report(case_id: int, db: Session = Depends(get_db), user: User = Depends(get_current_user)):
+    """A printable case status report — same access control as the case
+    detail screen (_get_visible_case), so a citizen or officer can only
+    generate a PDF for a case they could already view as JSON. See
+    app.services.case_report for what each section is actually built
+    from."""
+    case = _get_visible_case(db, user, case_id)
+    pdf_bytes = case_report.build_case_report_pdf(db, case)
+
+    audit.record(
+        db, user,
+        action="case.download_report",
+        entity_type="case",
+        entity_id=case.id,
+    )
+    db.commit()
+
+    filename = f"{case.case_number.replace('/', '-')}-status-report.pdf"
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
