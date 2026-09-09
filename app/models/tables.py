@@ -1109,7 +1109,7 @@ class NotificationSubscription(Base):
 class NotificationLog(Base):
     """One send attempt, on one channel, to one recipient — the record
     app.services.landowner_notify.notify_landowner writes every time it
-    tries WhatsApp or email against a subscription. A ledger, not a status
+    tries SMS or email against a subscription. A ledger, not a status
     column on the subscription: one subscription lives through many
     notification events (a preliminary notification, then a declaration,
     then a status update), and each has to be answerable for on its own,

@@ -20,10 +20,10 @@ Who gets what is decided here, once, rather than in each rule:
   it is a fact about their case, not a finding about the office's
   performance, and it is the reason the "does severity matter to a
   landowner" question had a real answer to build toward.
-- Both of those also reach WhatsApp, not just the in-app inbox, when the
+- Both of those also reach SMS, not just the in-app inbox, when the
   landowner has a phone number on file (Person.phone) and owns a parcel on
   the case in question — see the calls into
-  app.services.landowner_notify.notify_account_holder_whatsapp below. An
+  app.services.landowner_notify.notify_account_holder_sms below. An
   in-app notification only reaches someone who thinks to open the portal;
   most of these families do not.
 
@@ -235,7 +235,7 @@ def notify_case_landowners(
     """
     parcels = db.query(Parcel).filter(Parcel.case_id == case.id).all()
     owner_person_ids = {p.owner_id for p in parcels}
-    # First parcel found per owner, only to give the WhatsApp send below
+    # First parcel found per owner, only to give the SMS send below
     # something to log against — an owner with several parcels on one case
     # still gets a single message about a case-level event, not one per
     # parcel.
@@ -258,7 +258,7 @@ def notify_case_landowners(
         person = db.get(Person, owner.person_id) if owner.person_id else None
         parcel = parcel_by_owner_id.get(owner.person_id)
         if person and person.phone and parcel:
-            landowner_notify.notify_account_holder_whatsapp(db, parcel, person.phone, body)
+            landowner_notify.notify_account_holder_sms(db, parcel, person.phone, body)
 
     return len(landowner_users)
 
@@ -299,6 +299,6 @@ def notify_objection_filer(
             .first()
         )
         if parcel:
-            landowner_notify.notify_account_holder_whatsapp(db, parcel, person.phone, body)
+            landowner_notify.notify_account_holder_sms(db, parcel, person.phone, body)
 
     return True

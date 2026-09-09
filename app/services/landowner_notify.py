@@ -1,5 +1,12 @@
 """notifyLandowner — the one place a message actually goes out to a citizen
-who subscribed on the public Notices page, over WhatsApp, email, or both.
+who subscribed on the public Notices page, over SMS, email, or both.
+
+SMS over WhatsApp: WhatsApp needed a recipient to have first messaged the
+Twilio sandbox number (or, in production, opted into a WhatsApp Business
+template) before this project could reach them — a real barrier for a
+citizen who has never heard of BhoomiMitra. Plain SMS delivers to any phone
+number with no opt-in dance, at the cost of losing WhatsApp's read receipts
+and rich formatting, which this notification never used anyway.
 
 Both callers — POST /notices/subscribe (an immediate "here's where your
 land stands today") and POST /notices/register's issue_notice (a real
@@ -82,9 +89,9 @@ def notify_landowner(
         if subscription.whatsapp_number:
             logs.append(
                 _send_one(
-                    db, provider, parcel, NotificationChannel.WHATSAPP,
+                    db, provider, parcel, NotificationChannel.SMS,
                     subscription.whatsapp_number, notification_type,
-                    send=lambda to: provider.send_whatsapp(to, body),
+                    send=lambda to: provider.send_sms(to, body),
                 )
             )
         if subscription.email:
@@ -119,10 +126,10 @@ def _send_one(db, provider, parcel, channel, recipient, notification_type, *, se
     return log
 
 
-def notify_account_holder_whatsapp(db: Session, parcel: Parcel, phone: str, body: str) -> NotificationLog:
-    """WhatsApp a case event straight to a logged-in landowner's own phone
-    number (Person.phone), independent of the anonymous /notices/subscribe
-    flow above.
+def notify_account_holder_sms(db: Session, parcel: Parcel, phone: str, body: str) -> NotificationLog:
+    """SMS a case event straight to a logged-in landowner's own phone number
+    (Person.phone), independent of the anonymous /notices/subscribe flow
+    above.
 
     Called from app.services.notify's notify_case_landowners and
     notify_objection_filer — the two places a landowner with a real
@@ -140,9 +147,9 @@ def notify_account_holder_whatsapp(db: Session, parcel: Parcel, phone: str, body
     """
     provider = messaging.get_provider()
     return _send_one(
-        db, provider, parcel, NotificationChannel.WHATSAPP,
+        db, provider, parcel, NotificationChannel.SMS,
         phone, STATUS_UPDATE,
-        send=lambda to: provider.send_whatsapp(to, body),
+        send=lambda to: provider.send_sms(to, body),
     )
 
 

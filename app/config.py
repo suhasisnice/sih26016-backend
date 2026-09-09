@@ -22,13 +22,11 @@ class Settings(BaseSettings):
     land_records_provider: str = "mock"
     # "mock" (default) logs instead of sending — see
     # app.integrations.messaging for the WhatsApp/email provider seam.
-    # "live" sends WhatsApp via Twilio and email via SMTP; see
+    # "live" sends SMS via Twilio and email via SMTP; see
     # app.integrations.messaging.live for the credential vars it reads.
     notification_provider: str = "mock"
 
-    # Twilio WhatsApp — used only when notification_provider="live".
-    # twilio_whatsapp_from is Twilio's own number in "whatsapp:+1415..."
-    # form (the sandbox number while testing), not the recipient's.
+    # Twilio — used only when notification_provider="live".
     # twilio_account_sid is always required — it's what scopes either
     # credential below to one account. Auth Token is Twilio's original,
     # full-access master credential; an API Key (SID starting "SK" + its
@@ -38,6 +36,17 @@ class Settings(BaseSettings):
     twilio_auth_token: str = ""
     twilio_api_key_sid: str = ""
     twilio_api_key_secret: str = ""
+    # A Twilio phone number with SMS capability, e.g. "+14155551234" — the
+    # channel app.services.landowner_notify actually sends citizen
+    # notifications on. Sending to an Indian number needs that number's
+    # carrier/DLT registration sorted on Twilio's side first; an
+    # unregistered sender typically gets silently filtered rather than
+    # bounced, which reads as "nothing happened" rather than an error here.
+    twilio_sms_from: str = ""
+    # Twilio WhatsApp sender, "whatsapp:+1415..." form — send_whatsapp still
+    # works if anything calls it directly, but nothing in this codebase does
+    # anymore; kept for the one Twilio account to cover both channels
+    # without a second vendor integration.
     twilio_whatsapp_from: str = ""
 
     # SMTP email — used only when notification_provider="live".
