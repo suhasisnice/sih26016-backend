@@ -32,6 +32,10 @@ class MessagingProvider(Protocol):
 
     info: ProviderInfo
 
+    def send_sms(self, to: str, message: str) -> None:
+        """Raises MessagingUnavailable if the provider could not send it."""
+        ...
+
     def send_whatsapp(self, to: str, message: str) -> None:
         """Raises MessagingUnavailable if the provider could not send it."""
         ...

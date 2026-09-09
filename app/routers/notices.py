@@ -360,7 +360,14 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 class SubscribeRequest(BaseModel):
     survey_number: str | None = Field(default=None, max_length=20)
     ulpin: str | None = Field(default=None, max_length=14)
-    whatsapp_number: str | None = Field(default=None, max_length=20)
+    # Field name is phone_number, not whatsapp_number: the API contract
+    # carries what a citizen actually enters (a mobile number), independent
+    # of which vendor/channel it's delivered through underneath — see
+    # app.services.landowner_notify for why that's SMS today. The
+    # NotificationSubscription column it lands on is still called
+    # whatsapp_number (renaming a live production column is a migration
+    # this project didn't need to take on for a naming cleanup).
+    phone_number: str | None = Field(default=None, max_length=20)
     email: str | None = Field(default=None, max_length=255)
     # No default: silently treating a missing box as "consented" is exactly
     # the failure mode consent exists to prevent.
@@ -371,9 +378,9 @@ class SubscribeResponse(BaseModel):
     id: int
     message: str
     # "sent" | "failed" | None (None = that channel wasn't chosen) — lets
-    # the UI show WhatsApp ✓ / Email ✓ per channel rather than one bare
+    # the UI show SMS ✓ / Email ✓ per channel rather than one bare
     # success, and tell a real send failure apart from "wasn't asked for".
-    whatsapp_status: str | None = None
+    sms_status: str | None = None
     email_status: str | None = None
     # Off NotificationLog.is_mock for this attempt — lets the frontend show
     # "not actually delivered" only while NOTIFICATION_PROVIDER is still
@@ -395,12 +402,12 @@ def subscribe(payload: SubscribeRequest, db: Session = Depends(get_db)):
             status.HTTP_400_BAD_REQUEST,
             "Consent is required before we can send you updates about this land.",
         )
-    if not payload.whatsapp_number and not payload.email:
+    if not payload.phone_number and not payload.email:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "Choose at least one of WhatsApp or email to be notified on.",
+            "Choose at least one of SMS or email to be notified on.",
         )
-    if payload.whatsapp_number and not _PHONE_RE.match(payload.whatsapp_number.strip()):
+    if payload.phone_number and not _PHONE_RE.match(payload.phone_number.strip()):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "That doesn't look like a valid mobile number.")
     if payload.email and not _EMAIL_RE.match(payload.email.strip()):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "That doesn't look like a valid email address.")
@@ -413,17 +420,17 @@ def subscribe(payload: SubscribeRequest, db: Session = Depends(get_db)):
         )
     parcel, case = row
 
-    whatsapp_number = payload.whatsapp_number.strip() if payload.whatsapp_number else None
+    phone_number = payload.phone_number.strip() if payload.phone_number else None
     email = payload.email.strip().lower() if payload.email else None
 
     duplicate_query = db.query(NotificationSubscription).filter(
         NotificationSubscription.parcel_id == parcel.id
     )
-    if whatsapp_number:
-        existing_whatsapp = duplicate_query.filter(
-            NotificationSubscription.whatsapp_number == whatsapp_number
+    if phone_number:
+        existing_phone = duplicate_query.filter(
+            NotificationSubscription.whatsapp_number == phone_number
         ).first()
-        if existing_whatsapp:
+        if existing_phone:
             raise HTTPException(
                 status.HTTP_409_CONFLICT,
                 "That number is already subscribed to updates for this land.",
@@ -438,7 +445,7 @@ def subscribe(payload: SubscribeRequest, db: Session = Depends(get_db)):
 
     subscription = NotificationSubscription(
         parcel_id=parcel.id,
-        whatsapp_number=whatsapp_number,
+        whatsapp_number=phone_number,
         email=email,
         consent_given_at=datetime.now(timezone.utc),
     )
@@ -464,13 +471,13 @@ def subscribe(payload: SubscribeRequest, db: Session = Depends(get_db)):
     logs = landowner_notify.notify_landowner(db, parcel, project, notification_type, status_label)
     db.commit()
 
-    whatsapp_status = next((log.status.value for log in logs if log.channel == NotificationChannel.WHATSAPP), None)
+    sms_status = next((log.status.value for log in logs if log.channel == NotificationChannel.SMS), None)
     email_status = next((log.status.value for log in logs if log.channel == NotificationChannel.EMAIL), None)
 
     return SubscribeResponse(
         id=subscription.id,
         message="You're subscribed to updates on this land.",
-        whatsapp_status=whatsapp_status,
+        sms_status=sms_status,
         email_status=email_status,
         # True if no attempt was made too (nothing chosen) — there's nothing
         # "actually delivered" to caption either way, so mock is the safe

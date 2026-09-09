@@ -1,10 +1,13 @@
-"""The real provider: WhatsApp via Twilio, email via SMTP.
+"""The real provider: SMS via Twilio, email via SMTP.
 
 Two unrelated vendors behind one class because the registry in
 app.integrations.messaging.providers selects a single MessagingProvider for
 both channels — see that module's docstring. Each method reads its own
-settings and is otherwise independent; a WhatsApp send never touches SMTP
-and vice versa.
+settings and is otherwise independent; an SMS send never touches SMTP and
+vice versa. send_whatsapp is kept working (a separate Twilio sender number,
+TWILIO_WHATSAPP_FROM) for anything that still calls it directly, but
+nothing in app.services.landowner_notify does anymore — see that module for
+why SMS was chosen over WhatsApp for citizen notifications.
 
 Missing credentials are treated as MessagingUnavailable, not a startup
 crash: NOTIFICATION_PROVIDER=live with an unfilled var must degrade to a
@@ -40,7 +43,28 @@ def _twilio_client() -> Client:
 
 
 class LiveMessagingProvider:
-    info = ProviderInfo(key="live", label="Twilio WhatsApp + SMTP email (live)", is_live=True)
+    info = ProviderInfo(key="live", label="Twilio SMS + SMTP email (live)", is_live=True)
+
+    def send_sms(self, to: str, message: str) -> None:
+        has_auth_token = settings.twilio_account_sid and settings.twilio_auth_token
+        has_api_key = (
+            settings.twilio_account_sid and settings.twilio_api_key_sid and settings.twilio_api_key_secret
+        )
+        if not ((has_auth_token or has_api_key) and settings.twilio_sms_from):
+            raise MessagingUnavailable(
+                "Twilio is not configured — set TWILIO_ACCOUNT_SID and TWILIO_SMS_FROM, "
+                "plus either TWILIO_AUTH_TOKEN or TWILIO_API_KEY_SID/TWILIO_API_KEY_SECRET."
+            )
+        client = _twilio_client()
+        try:
+            client.messages.create(
+                from_=settings.twilio_sms_from,
+                to=to.strip(),
+                body=message,
+            )
+        except TwilioRestException as exc:
+            logger.warning("[TWILIO SMS] to=%s failed: %s", to, exc)
+            raise MessagingUnavailable(str(exc)) from exc
 
     def send_whatsapp(self, to: str, message: str) -> None:
         has_auth_token = settings.twilio_account_sid and settings.twilio_auth_token

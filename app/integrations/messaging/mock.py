@@ -18,6 +18,7 @@ from app.integrations.messaging.base import MessagingUnavailable, ProviderInfo
 # real address is never affected.
 _FAIL_EMAIL_MARKER = "faildemo"
 _FAIL_WHATSAPP_NUMBER = "0000000000"
+_FAIL_SMS_NUMBER = "0000000000"
 
 logger = logging.getLogger("bhoomimitra.messaging")
 logger.setLevel(logging.INFO)
@@ -35,6 +36,12 @@ if not logger.handlers:
 
 class MockMessagingProvider:
     info = ProviderInfo(key="mock", label="Mock notification log (simulated)", is_live=False)
+
+    def send_sms(self, to: str, message: str) -> None:
+        if to.strip() == _FAIL_SMS_NUMBER:
+            logger.info("[MOCK SMS] to=%s FAILED (simulated)", to)
+            raise MessagingUnavailable("Simulated SMS failure for testing.")
+        logger.info("[MOCK SMS] to=%s message=%r", to, message)
 
     def send_whatsapp(self, to: str, message: str) -> None:
         if to.strip() == _FAIL_WHATSAPP_NUMBER:
