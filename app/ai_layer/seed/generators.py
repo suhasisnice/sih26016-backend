@@ -47,6 +47,7 @@ from app.models import (
 )
 from app.services import numbering, sla
 from app.services.compensation import compute_award
+from app.services.uploads import write_seed_placeholder_pdf
 
 STAGE_ORDER = list(Stage)
 
@@ -296,18 +297,30 @@ def build_case(
             continue  # the anomaly: current stage's paperwork not yet on file
         doc_date = transition_dates[index]
         for position, doc_type in enumerate(REQUIRED_DOCUMENTS.get(completed_stage, [])):
+            # Flat, deterministic and unique (case_number is unique) — a
+            # real file is written to it below, so "Download" on a demo
+            # case returns actual bytes instead of a 404. Must stay flat:
+            # the download route's traversal guard (path.parent !=
+            # upload_dir) refuses anything with a subdirectory in it.
+            stored_name = f"seed-{case.case_number.replace('/', '-')}-{completed_stage.value}-{position}.pdf"
+            saved = write_seed_placeholder_pdf(
+                stored_name,
+                case_number=case.case_number,
+                doc_type_label=doc_type.value.replace("_", " ").title(),
+                doc_date=doc_date,
+            )
             db.add(
                 Document(
                     case_id=case.id,
                     doc_type=doc_type,
                     filename=f"{doc_type.value}.pdf",
-                    stored_name=f"seed/{case.case_number}/{completed_stage.value}-{position}.pdf",
+                    stored_name=saved.stored_name,
                     content_type="application/pdf",
-                    size_bytes=rng.randint(40_000, 900_000),
+                    size_bytes=saved.size_bytes,
                     uploaded_on=doc_date,
                     version=1,
                     is_current=True,
-                    sha256=None,
+                    sha256=saved.sha256_hex,
                 )
             )
 
