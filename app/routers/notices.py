@@ -14,6 +14,7 @@ of them. Nothing here is scoped to a district, because the public record is
 not.
 """
 
+import json
 import re
 from datetime import date, datetime, timezone
 
@@ -31,6 +32,7 @@ from app.core.enums import (
     Role,
     Stage,
 )
+from app.config import settings
 from app.core.security import hash_password
 from app.dependencies import get_db
 from app.models import (
@@ -369,6 +371,10 @@ class SubscribeRequest(BaseModel):
     # this project didn't need to take on for a naming cleanup).
     phone_number: str | None = Field(default=None, max_length=20)
     email: str | None = Field(default=None, max_length=255)
+    # The browser's own PushSubscription object (endpoint + keys.p256dh +
+    # keys.auth) from `registration.pushManager.subscribe(...)` — passed
+    # through untouched, stored as JSON. See app/integrations/messaging/push.py.
+    push_subscription: dict | None = None
     # No default: silently treating a missing box as "consented" is exactly
     # the failure mode consent exists to prevent.
     consent: bool
@@ -382,6 +388,7 @@ class SubscribeResponse(BaseModel):
     # success, and tell a real send failure apart from "wasn't asked for".
     sms_status: str | None = None
     email_status: str | None = None
+    push_status: str | None = None
     # Off NotificationLog.is_mock for this attempt — lets the frontend show
     # "not actually delivered" only while NOTIFICATION_PROVIDER is still
     # "mock", instead of hardcoding that caption forever (see live.py).
@@ -402,10 +409,10 @@ def subscribe(payload: SubscribeRequest, db: Session = Depends(get_db)):
             status.HTTP_400_BAD_REQUEST,
             "Consent is required before we can send you updates about this land.",
         )
-    if not payload.phone_number and not payload.email:
+    if not payload.phone_number and not payload.email and not payload.push_subscription:
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST,
-            "Choose at least one of SMS or email to be notified on.",
+            "Choose at least one of SMS, email, or browser notifications to be notified on.",
         )
     if payload.phone_number and not _PHONE_RE.match(payload.phone_number.strip()):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "That doesn't look like a valid mobile number.")
@@ -422,6 +429,11 @@ def subscribe(payload: SubscribeRequest, db: Session = Depends(get_db)):
 
     phone_number = payload.phone_number.strip() if payload.phone_number else None
     email = payload.email.strip().lower() if payload.email else None
+    # endpoint alone identifies a browser subscription uniquely (it's a
+    # per-installation URL the push service itself assigns) — enough to
+    # dedupe on without needing to compare the encryption keys too.
+    push_endpoint = payload.push_subscription.get("endpoint") if payload.push_subscription else None
+    push_subscription_json = json.dumps(payload.push_subscription) if payload.push_subscription else None
 
     duplicate_query = db.query(NotificationSubscription).filter(
         NotificationSubscription.parcel_id == parcel.id
@@ -442,11 +454,23 @@ def subscribe(payload: SubscribeRequest, db: Session = Depends(get_db)):
                 status.HTTP_409_CONFLICT,
                 "That email is already subscribed to updates for this land.",
             )
+    if push_endpoint:
+        existing_push = [
+            row
+            for row in duplicate_query.filter(NotificationSubscription.push_subscription.isnot(None))
+            if json.loads(row.push_subscription).get("endpoint") == push_endpoint
+        ]
+        if existing_push:
+            raise HTTPException(
+                status.HTTP_409_CONFLICT,
+                "This browser is already subscribed to updates for this land.",
+            )
 
     subscription = NotificationSubscription(
         parcel_id=parcel.id,
         whatsapp_number=phone_number,
         email=email,
+        push_subscription=push_subscription_json,
         consent_given_at=datetime.now(timezone.utc),
     )
     db.add(subscription)
@@ -473,17 +497,29 @@ def subscribe(payload: SubscribeRequest, db: Session = Depends(get_db)):
 
     sms_status = next((log.status.value for log in logs if log.channel == NotificationChannel.SMS), None)
     email_status = next((log.status.value for log in logs if log.channel == NotificationChannel.EMAIL), None)
+    push_status = next((log.status.value for log in logs if log.channel == NotificationChannel.PUSH), None)
 
     return SubscribeResponse(
         id=subscription.id,
         message="You're subscribed to updates on this land.",
         sms_status=sms_status,
         email_status=email_status,
+        push_status=push_status,
         # True if no attempt was made too (nothing chosen) — there's nothing
         # "actually delivered" to caption either way, so mock is the safe
         # default rather than a bare False with no send behind it.
         is_mock=all(log.is_mock for log in logs) if logs else True,
     )
+
+
+@router.get("/push/vapid-public-key")
+def vapid_public_key():
+    """The one thing a browser needs before it can create a PushSubscription
+    — `applicationServerKey` for `pushManager.subscribe()`. Public by
+    design (RFC 8292): this key only lets a browser address *this*
+    deployment's push messages to itself: it authorizes nothing, and
+    carries no reason to gate it behind a login."""
+    return {"public_key": settings.vapid_public_key}
 
 
 class ProvisionRequest(BaseModel):
