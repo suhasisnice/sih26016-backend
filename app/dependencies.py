@@ -2,10 +2,11 @@ from fastapi import Depends, Header, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from sqlalchemy.orm import Session
 
-from app.core.enums import Role
+from app.core.enums import Role, Stage
 from app.core.security import decode_access_token
 from app.database import SessionLocal
-from app.models import Case, District, Parcel, Proposal, User
+from app.models import Case, District, Parcel, Proposal, SurveyTask, User
+from app.services import workflow
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
@@ -128,7 +129,37 @@ def scope_cases_to_user(query, user: User):
     if user.role in DISTRICT_SCOPED_ROLES:
         if user.district_id is None:
             return query.filter(Case.id.is_(None))
-        return query.filter(Case.district_id == user.district_id)
+        district_query = query.filter(Case.district_id == user.district_id)
+
+        # District Officer and SLAO administer a case across its whole
+        # lifecycle (see workflow.CASE_STAGE_OWNERS) and keep the full
+        # district caseload. Field Officer and R&R Officer are stage
+        # specialists, not general case administrators — without this, an
+        # R&R Officer saw every case in their district regardless of stage,
+        # including ones still at Preliminary Notification with nothing
+        # for them to do. Each is narrowed to the stage(s) their role
+        # actually works at (workflow.FIELD_OFFICER_STAGES /
+        # STAGE_RESPONSIBLE_ROLE) — the same mapping that decides whether
+        # they may advance a case, so visibility and the Advance Stage
+        # action always agree on whose case this is.
+        #
+        # A Field Officer additionally keeps any case carrying a survey
+        # task assigned to them by name, even if it has since moved past
+        # their stage — that survey is still their open work, and losing
+        # sight of the case mid-task would strand it with no way to finish
+        # or hand it off cleanly.
+        if user.role is Role.FIELD_OFFICER:
+            assigned = query.session.query(SurveyTask.case_id).filter(
+                SurveyTask.assigned_to_user_id == user.id
+            )
+            return district_query.filter(
+                Case.stage.in_(workflow.FIELD_OFFICER_STAGES) | Case.id.in_(assigned)
+            )
+        if user.role is Role.RNR_OFFICER:
+            return district_query.filter(
+                Case.stage == Stage.REHABILITATION_RESETTLEMENT
+            )
+        return district_query
 
     if user.role in STATE_SCOPED_ROLES:
         if user.state_id is None:

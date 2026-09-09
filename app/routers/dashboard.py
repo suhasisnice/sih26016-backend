@@ -55,7 +55,7 @@ from app.schemas.dashboard import (
     TrendPoint,
     TrendSeries,
 )
-from app.services import sla
+from app.services import sla, workflow
 
 router = APIRouter(prefix="/dashboard", tags=["dashboard"])
 
@@ -397,12 +397,11 @@ def cases_requiring_attention(
     return AttentionList(items=items[:limit], total=len(items))
 
 
-# The three stages a field officer is actually on the ground for. Sections
-# 4-9 (social impact assessment) and 12 (land verification) are surveys by
-# definition; Section 15 (objection period) is when a filed objection sends
-# someone back out to the parcel it names. Declaration onward is paperwork
-# and payment, not a site visit.
-FIELD_WORK_STAGES = (Stage.SOCIAL_IMPACT_ASSESSMENT, Stage.LAND_VERIFICATION, Stage.OBJECTION_PERIOD)
+# The three stages a field officer is actually on the ground for. Sourced
+# from workflow rather than redefined here — it is also what
+# app.dependencies.scope_cases_to_user now scopes a Field Officer's whole
+# caseload to, so this queue and that entitlement can't silently diverge.
+FIELD_WORK_STAGES = workflow.FIELD_OFFICER_STAGES
 
 
 @router.get("/field-work", response_model=FieldWorkList)

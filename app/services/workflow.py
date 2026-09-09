@@ -16,12 +16,55 @@ from datetime import date
 from fastapi import HTTPException, status
 from sqlalchemy.orm import Session
 
-from app.core.enums import CaseStatus, ObjectionStatus, Stage, SurveyTaskStatus
+from app.core.enums import CaseStatus, ObjectionStatus, Role, Stage, SurveyTaskStatus
 from app.models import Case, CaseStageHistory, Objection, SurveyTask, User
 from app.services import audit, sla
 
 STAGE_ORDER: list[Stage] = list(Stage)
 TERMINAL_STAGE = STAGE_ORDER[-1]
+
+# Which role normally owns each stage — the same assignment the case detail
+# page's "Responsible" field already shows (frontend: auth/permissions.js,
+# kept identical to this on purpose). Central here because it is workflow's
+# own domain: which role does what work, in what order. Used two ways: to
+# decide who may advance a case out of its current stage (can_advance below)
+# and, on the frontend, to scope a specialist officer's caseload to the
+# stage(s) that are actually theirs.
+#
+# District Officer and SLAO are deliberately absent as VALUES here even
+# though they administer most of the lifecycle — see CASE_STAGE_OWNERS
+# below, which grants them (and Admin) every stage rather than naming them
+# stage by stage.
+STAGE_RESPONSIBLE_ROLE: dict[Stage, Role] = {
+    Stage.PRELIMINARY_NOTIFICATION: Role.SLAO,
+    Stage.SOCIAL_IMPACT_ASSESSMENT: Role.SLAO,
+    Stage.LAND_VERIFICATION: Role.FIELD_OFFICER,
+    Stage.OBJECTION_PERIOD: Role.SLAO,
+    Stage.DECLARATION: Role.SLAO,
+    Stage.AWARD: Role.SLAO,
+    Stage.REHABILITATION_RESETTLEMENT: Role.RNR_OFFICER,
+    Stage.POSSESSION: Role.FIELD_OFFICER,
+    Stage.MONITORING: Role.DISTRICT_OFFICER,
+}
+
+# The stages a Field Officer has on-ground work at, for scoping their
+# caseload (see app.dependencies.scope_cases_to_user) — broader than just
+# the one stage STAGE_RESPONSIBLE_ROLE names them for, because they do real
+# fieldwork at Social Impact Assessment and answer objections in the field
+# too, without being the one who formally advances either. Sections 4-9
+# (social impact assessment) and 12 (land verification) are surveys by
+# definition; Section 15 (objection period) is when a filed objection sends
+# someone back out to the parcel it names. Declaration onward is paperwork
+# and payment, not a site visit — this also mirrors
+# app.routers.dashboard.field_work_queue's own FIELD_WORK_STAGES, which
+# reads from here rather than keeping its own copy.
+FIELD_OFFICER_STAGES = (Stage.SOCIAL_IMPACT_ASSESSMENT, Stage.LAND_VERIFICATION, Stage.OBJECTION_PERIOD)
+
+# Roles that administer a case across its whole lifecycle rather than one
+# stage of it. app.routers.cases.CASE_WRITERS is this same tuple, imported
+# from here rather than redefined, so a role added to one can't drift from
+# the other.
+CASE_STAGE_OWNERS = (Role.ADMIN, Role.DISTRICT_OFFICER, Role.SLAO)
 
 
 def allowed_transitions(current: Stage) -> list[Stage]:
@@ -39,6 +82,22 @@ def next_stage(current: Stage) -> Stage | None:
     if index >= len(STAGE_ORDER) - 1:
         return None
     return STAGE_ORDER[index + 1]
+
+
+def can_advance(user: User, case: Case) -> bool:
+    """Whether `user` may move `case` out of its current stage.
+
+    Admin, District Officer and SLAO carry a case across its whole
+    lifecycle (CASE_STAGE_OWNERS) — the case-management backbone roles this
+    system already trusted with every stage. Field Officer and R&R Officer
+    are narrower: each may push a case forward only when it is sitting at
+    the one stage STAGE_RESPONSIBLE_ROLE actually names them for. Everyone
+    else (a landowner, a requiring body, state/ministry oversight) gets
+    nothing — they read a case, they do not operate it.
+    """
+    if user.role in CASE_STAGE_OWNERS:
+        return True
+    return STAGE_RESPONSIBLE_ROLE.get(case.stage) is user.role
 
 
 def advance_case(
