@@ -59,15 +59,15 @@ qrcode==8.0
 # smtplib from the standard library, so it adds no dependency of its own.
 twilio==9.11.0
 
-# Web Push (VAPID) for the push notification channel — see
-# app/integrations/messaging/live.py's send_push and app/services/push.py.
-# No vendor account: VAPID is a self-generated keypair, not a third-party
-# credential, so this channel has none of SMS's trial/DLT gating.
-pywebpush==2.0.3
-
 # At-rest encryption for TOTP secrets and biometric templates — see
 # app/services/crypto.py. Not a transitive dependency of anything else
 # this project uses (pyjwt only needs it for RS/ES algorithms, and
 # ALGORITHM is HS256), so it is listed explicitly rather than relied on
 # by accident.
 cryptography==44.0.1
+
+# Web Push (VAPID) for the push notification channel — see
+# app/integrations/messaging/live.py's send_push and app/services/push.py.
+# No vendor account: VAPID is a self-generated keypair, not a third-party
+# credential, so this channel has none of SMS's trial/DLT gating.
+pywebpush==2.0.3
