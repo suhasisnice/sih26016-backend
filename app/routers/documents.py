@@ -40,7 +40,7 @@ from app.schemas.document import (
     MissingDocuments,
 )
 from app.services import audit
-from app.services.uploads import save_upload_file
+from app.services.uploads import save_upload_file, write_seed_placeholder_pdf
 
 router = APIRouter(prefix="/documents", tags=["documents"])
 
@@ -272,21 +272,48 @@ def download_document(
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ):
-    """Stream a document back, after checking the caller may see its case."""
+    """Stream a document back, after checking the caller may see its case.
+
+    Self-heals a seed-generated placeholder that has gone missing from
+    disk — Render's free tier wipes the container filesystem on every
+    deploy AND every wake-from-sleep (see DEPLOYMENT.md), so a file
+    written once at seed time does not reliably survive to when someone
+    actually clicks Download. A seed placeholder's stored_name always
+    starts with "seed-" (see app.services.uploads.write_seed_placeholder_pdf
+    and the generator that calls it) and everything needed to rebuild an
+    identical one — case number, document type, the date on file — is
+    already on the row, so it is regenerated on the spot rather than
+    404ing on data that was never really lost, just the disk under it.
+    A genuinely uploaded file (an officer's real upload, a landowner's
+    grievance attachment) has no such stand-in and still 404s if it is
+    gone — that loss is real and this cannot paper over it.
+    """
     document = db.get(Document, document_id)
     if document is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document not found")
 
     # Entitlement is checked against the case, not the document: knowing a
     # document id must never be enough to read another district's file.
-    _case_or_404(db, user, document.case_id)
+    case = _case_or_404(db, user, document.case_id)
 
     upload_dir = Path(settings.upload_dir).resolve()
     path = (upload_dir / document.stored_name).resolve()
-    if path.parent != upload_dir or not path.is_file():
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="Document file is not on disk"
+    if path.parent != upload_dir:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Document file is not on disk")
+
+    if not path.is_file():
+        if not document.stored_name.startswith("seed-"):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND, detail="Document file is not on disk"
+            )
+        saved = write_seed_placeholder_pdf(
+            document.stored_name,
+            case_number=case.case_number,
+            doc_type_label=document.doc_type.value.replace("_", " ").title(),
+            doc_date=document.uploaded_on,
         )
+        document.size_bytes = saved.size_bytes
+        document.sha256 = saved.sha256_hex
 
     # Reads are audited as well as writes. For a land record, who opened a
     # document is usually the more sensitive question, and it was the half
