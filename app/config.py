@@ -17,7 +17,6 @@ DEV_ENCRYPTION_KEY = "3mMvGVbPVYmcGGVjsUw4-opIrxxCRaKwyYi3fRd1STE="
 DEV_VAPID_PRIVATE_KEY = "yMkRYUMaZ3ZzysLAfNt9XEacBzOzhsf3NyIvEwQAwuo"
 DEV_VAPID_PUBLIC_KEY = "BIdB0ByQ1rpVn0IiuSl5eia629Wcqbrx0EOlcBzFnoi6ZV9ydFOMvwfWSdAGhh60DDyrQdQjav3bmq4zb79eDGw"
 
-
 class Settings(BaseSettings):
     environment: str = "development"
     database_url: str = "postgresql://sih26016:sih26016@db:5432/sih26016"
