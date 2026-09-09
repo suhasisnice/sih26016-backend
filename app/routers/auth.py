@@ -36,6 +36,7 @@ def _user_out(user: User) -> UserOut:
         state_id=user.state_id,
         state_name=user.state.name if user.state else None,
         organisation=user.organisation,
+        person_id=user.person_id,
     )
 
 

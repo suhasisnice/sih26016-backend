@@ -34,9 +34,24 @@ from reportlab.platypus import (
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from app.core.enums import Stage
-from app.models import Case, CaseStageHistory, Document, Parcel, RequiredDocument, Statute, StatuteStageReference
+from app.core.enums import CompensationStatus, Role, Stage
+from app.models import (
+    AffectedFamily,
+    Case,
+    CaseStageHistory,
+    Compensation,
+    Document,
+    Grievance,
+    Parcel,
+    Person,
+    RequiredDocument,
+    Statute,
+    StatuteStageReference,
+    User,
+    Village,
+)
 from app.services import sla, workflow
+from app.services.grievances import OPEN_STATUSES as GRIEVANCE_OPEN_STATUSES
 from app.services.statutes import RFCTLARR, STATUTES
 
 INK = colors.HexColor("#1F2A24")
@@ -121,7 +136,14 @@ def _missing_documents(db: Session, case: Case) -> list[str]:
     return sorted(required - on_file)
 
 
-def build_case_report_pdf(db: Session, case: Case) -> bytes:
+def build_case_report_pdf(db: Session, case: Case, requesting_user: User | None = None) -> bytes:
+    """Build the case status report. When `requesting_user` is a landowner,
+    sections 5-7 personalise to their own household — their own compensation
+    figure, their own grievances — the same restraint every other
+    landowner-facing screen already applies to another affected family's
+    data. For anyone else (an officer, an admin) those sections summarise
+    the whole case instead, without naming individuals, the same privacy
+    default app.services.audit's own docstring states for the audit log."""
     today = date.today()
 
     # Kept simple and local to this report rather than importing the
@@ -287,6 +309,160 @@ def build_case_report_pdf(db: Session, case: Case) -> bytes:
             ]
         )
     )
+
+    is_landowner_report = requesting_user is not None and requesting_user.role is Role.LANDOWNER
+    own_person = (
+        db.get(Person, requesting_user.person_id)
+        if is_landowner_report and requesting_user.person_id
+        else None
+    )
+
+    # ---- 5. affected party / landowner ----
+    story.append(Paragraph("5.&nbsp; AFFECTED PARTY", styles["sectionHead"]))
+    if own_person is not None:
+        village = db.get(Village, own_person.village_id)
+        story.append(
+            _fact_table(
+                [
+                    ("Name", own_person.name),
+                    ("Village", village.name if village else "—"),
+                    ("Has Recorded Title", "Yes" if own_person.has_land_title else "No"),
+                    ("Phone on File", own_person.phone or "Not on file"),
+                ]
+            )
+        )
+    else:
+        total_affected = (
+            db.query(func.count(AffectedFamily.id)).filter(AffectedFamily.case_id == case.id).scalar()
+            or 0
+        )
+        landowner_count = (
+            db.query(func.count(AffectedFamily.id))
+            .filter(AffectedFamily.case_id == case.id, AffectedFamily.is_landowner.is_(True))
+            .scalar()
+            or 0
+        )
+        story.append(
+            _fact_table(
+                [
+                    ("Affected Households", str(total_affected)),
+                    ("Of Which Landowners", str(landowner_count)),
+                ]
+            )
+        )
+
+    # ---- 6. compensation status ----
+    story.append(Paragraph("6.&nbsp; COMPENSATION STATUS", styles["sectionHead"]))
+    if own_person is not None:
+        comp = (
+            db.query(Compensation)
+            .filter(Compensation.case_id == case.id, Compensation.person_id == own_person.id)
+            .first()
+        )
+        if comp is None:
+            story.append(Paragraph("No compensation record is on file for this household yet.", styles["cell"]))
+        else:
+            rows = [
+                ("Amount Awarded", f"Rs. {comp.amount_awarded:,}"),
+                ("Amount Paid", f"Rs. {comp.amount_paid:,}"),
+                ("Status", comp.status.value.replace("_", " ").title()),
+            ]
+            if comp.status is not CompensationStatus.PAID:
+                rows.append(("Note", "Indicative / Estimated — subject to official assessment and award."))
+            story.append(_fact_table(rows))
+    else:
+        comp_rows = db.query(Compensation).filter(Compensation.case_id == case.id).all()
+        if not comp_rows:
+            story.append(Paragraph("No compensation records are on file for this case yet.", styles["cell"]))
+        else:
+            total_awarded = sum(c.amount_awarded for c in comp_rows)
+            total_paid = sum(c.amount_paid for c in comp_rows)
+            story.append(
+                _fact_table(
+                    [
+                        ("Households With an Award", str(len(comp_rows))),
+                        ("Total Awarded", f"Rs. {total_awarded:,}"),
+                        ("Total Paid", f"Rs. {total_paid:,}"),
+                    ]
+                )
+            )
+
+    # ---- 7. grievance status ----
+    story.append(Paragraph("7.&nbsp; GRIEVANCE STATUS", styles["sectionHead"]))
+    grievance_query = db.query(Grievance).filter(Grievance.case_id == case.id)
+    if own_person is not None:
+        grievance_query = grievance_query.filter(Grievance.person_id == own_person.id)
+    grievances = grievance_query.order_by(Grievance.filed_on.desc()).all()
+    if not grievances:
+        story.append(Paragraph("No grievances have been raised on this case.", styles["cell"]))
+    else:
+        g_header = [Paragraph(h, styles["cellHead"]) for h in ("Grievance No.", "Subject", "Status", "Filed On")]
+        g_rows = [g_header]
+        for g in grievances[:15]:
+            g_rows.append(
+                [
+                    Paragraph(g.grievance_number, styles["cell"]),
+                    Paragraph(g.subject, styles["cell"]),
+                    Paragraph(g.status.value.replace("_", " ").title(), styles["cell"]),
+                    Paragraph(g.filed_on.strftime("%d %b %Y"), styles["cell"]),
+                ]
+            )
+        g_table = Table(g_rows, colWidths=[1.3 * inch, 2.4 * inch, 1.3 * inch, 1.0 * inch], repeatRows=1)
+        g_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), HEADER_BG),
+                    ("LINEBELOW", (0, 0), (-1, 0), 0.75, LINE),
+                    ("LINEBELOW", (0, 1), (-1, -1), 0.4, LINE),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ]
+            )
+        )
+        story.append(g_table)
+        open_count = sum(1 for g in grievances if g.status in GRIEVANCE_OPEN_STATUSES)
+        if open_count:
+            story.append(Spacer(1, 4))
+            story.append(Paragraph(f"{open_count} grievance(s) still open.", styles["cell"]))
+
+    # ---- 8. documents on file ----
+    story.append(Paragraph("8.&nbsp; DOCUMENTS ON FILE", styles["sectionHead"]))
+    doc_rows = (
+        db.query(Document)
+        .filter(Document.case_id == case.id, Document.is_current.is_(True))
+        .order_by(Document.uploaded_on.asc())
+        .all()
+    )
+    if not doc_rows:
+        story.append(Paragraph("No documents are currently on file for this case.", styles["cell"]))
+    else:
+        d_header = [Paragraph(h, styles["cellHead"]) for h in ("Document", "Filed", "Status")]
+        d_rows = [d_header]
+        for d in doc_rows:
+            d_rows.append(
+                [
+                    Paragraph(d.doc_type.value.replace("_", " ").title(), styles["cell"]),
+                    Paragraph(d.uploaded_on.strftime("%d %b %Y"), styles["cell"]),
+                    Paragraph(d.verification_status.value.replace("_", " ").title(), styles["cell"]),
+                ]
+            )
+        d_table = Table(d_rows, colWidths=[3.0 * inch, 1.5 * inch, 1.5 * inch], repeatRows=1)
+        d_table.setStyle(
+            TableStyle(
+                [
+                    ("BACKGROUND", (0, 0), (-1, 0), HEADER_BG),
+                    ("LINEBELOW", (0, 0), (-1, 0), 0.75, LINE),
+                    ("LINEBELOW", (0, 1), (-1, -1), 0.4, LINE),
+                    ("VALIGN", (0, 0), (-1, -1), "TOP"),
+                    ("TOPPADDING", (0, 0), (-1, -1), 5),
+                    ("BOTTOMPADDING", (0, 0), (-1, -1), 5),
+                    ("LEFTPADDING", (0, 0), (-1, -1), 6),
+                ]
+            )
+        )
+        story.append(d_table)
 
     story.append(Spacer(1, 20))
     story.append(HRFlowable(width="100%", thickness=1, color=LINE))

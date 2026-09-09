@@ -26,6 +26,15 @@ class UserOut(BaseModel):
     # Set only on a requiring-body account: the organisation it files
     # proposals for, and the scope its proposal list is built from.
     organisation: str | None = None
+    # Set only on a landowner account: which Person row this account is —
+    # the same link app.dependencies.scope_cases_to_user already uses to
+    # resolve "which cases are this landowner's" via Parcel.owner_id.
+    # Exposed so the frontend can pick this landowner's own row out of a
+    # case's affected-people list (their own compensation figure, not
+    # somebody else's) without a second lookup — not sensitive on its own,
+    # since every case this id could point to is already something this
+    # account can see.
+    person_id: int | None = None
 
 
 class LoginResponse(BaseModel):

@@ -336,3 +336,39 @@ class DiscrepancyStatus(str, Enum):
 class BiometricKind(str, Enum):
     """Which factor a stored biometric credential or a login attempt is."""
     FACE = "face"
+
+
+class GrievanceCategory(str, Enum):
+    """What a landowner's complaint is actually about — deliberately
+    separate from Objection (see Grievance's own docstring in
+    app.models.tables): an objection is the Sec. 15 statutory step, a
+    grievance is everything else a citizen might need to flag about their
+    own case."""
+    LAND_PROPERTY = "land_property"
+    COMPENSATION = "compensation"
+    DOCUMENT = "document"
+    SURVEY_MEASUREMENT = "survey_measurement"
+    NOTICE_NOTIFICATION = "notice_notification"
+    REHABILITATION_RESETTLEMENT = "rehabilitation_resettlement"
+    ACQUISITION_OBJECTION = "acquisition_objection"
+    DELAY_IN_PROCESSING = "delay_in_processing"
+    OTHER = "other"
+
+
+class GrievanceStatus(str, Enum):
+    """A grievance's lifecycle — richer than Objection's four states because
+    a service complaint routinely needs a "we need more from you" step an
+    objection never does."""
+    SUBMITTED = "submitted"
+    ASSIGNED = "assigned"
+    UNDER_REVIEW = "under_review"
+    INFO_REQUIRED = "info_required"
+    RESPONSE_PROVIDED = "response_provided"
+    RESOLVED = "resolved"
+    CLOSED = "closed"
+
+
+class GrievanceContactMethod(str, Enum):
+    SMS = "sms"
+    EMAIL = "email"
+    BOTH = "both"

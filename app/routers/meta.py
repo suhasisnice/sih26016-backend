@@ -13,6 +13,9 @@ from app.core.enums import (
     DiscrepancyType,
     DocType,
     DocumentVerificationStatus,
+    GrievanceCategory,
+    GrievanceContactMethod,
+    GrievanceStatus,
     LandUseType,
     NoticeType,
     ObjectionStatus,
@@ -76,4 +79,7 @@ def get_enums():
         "survey_photo_categories": _values(SurveyPhotoCategory),
         "discrepancy_types": _values(DiscrepancyType),
         "discrepancy_statuses": _values(DiscrepancyStatus),
+        "grievance_categories": _values(GrievanceCategory),
+        "grievance_statuses": _values(GrievanceStatus),
+        "grievance_contact_methods": _values(GrievanceContactMethod),
     }

@@ -15,7 +15,7 @@ import re
 
 from sqlalchemy.orm import Session
 
-from app.models import Case, District, Proposal, State
+from app.models import Case, District, Grievance, Proposal, State
 
 # Two to three characters for the state (KA, DL, AN for Andaman & Nicobar),
 # two to four for the district.
@@ -25,6 +25,11 @@ CASE_NUMBER_RE = re.compile(
 PROPOSAL_NUMBER_RE = re.compile(
     r"^PROP/(?P<state>[A-Z]{2,3})/(?P<year>\d{4})/(?P<seq>\d{3,})$"
 )
+# No state/district segment: a grievance is a citizen-service ticket, not a
+# legal instrument tied to one office's jurisdiction the way a case or
+# proposal number is, so it is numbered nationally per year, matching the
+# format the Landowner Portal spec itself gives (GRV-2026-00418).
+GRIEVANCE_NUMBER_RE = re.compile(r"^GRV-(?P<year>\d{4})-(?P<seq>\d{5,})$")
 
 
 def build_case_number(state_code: str, district_code: str, year: int, sequence: int) -> str:
@@ -33,6 +38,10 @@ def build_case_number(state_code: str, district_code: str, year: int, sequence: 
 
 def build_proposal_number(state_code: str, year: int, sequence: int) -> str:
     return f"PROP/{state_code}/{year}/{sequence:04d}"
+
+
+def build_grievance_number(year: int, sequence: int) -> str:
+    return f"GRV-{year}-{sequence:05d}"
 
 
 def next_case_number(db: Session, district: District, year: int) -> str:
@@ -89,3 +98,28 @@ def next_proposal_number(db: Session, state: State, year: int) -> str:
             highest = int(match.group("seq"))
 
     return build_proposal_number(state.code, year, highest + 1)
+
+
+def next_grievance_number(db: Session, year: int) -> str:
+    """Next free grievance number for this year, national.
+
+    Same derive-from-the-highest-issued approach as the two numbers above,
+    for the same reason: a row count would reissue a number if a grievance
+    were ever removed, and grievance_number is unique.
+    """
+    prefix = f"GRV-{year}-"
+    latest = (
+        db.query(Grievance.grievance_number)
+        .filter(Grievance.grievance_number.like(f"{prefix}%"))
+        .order_by(Grievance.grievance_number.desc())
+        .limit(1)
+        .scalar()
+    )
+
+    highest = 0
+    if latest:
+        match = GRIEVANCE_NUMBER_RE.match(latest)
+        if match:
+            highest = int(match.group("seq"))
+
+    return build_grievance_number(year, highest + 1)
