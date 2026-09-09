@@ -71,3 +71,9 @@ cryptography==44.0.1
 # No vendor account: VAPID is a self-generated keypair, not a third-party
 # credential, so this channel has none of SMS's trial/DLT gating.
 pywebpush==2.0.3
+
+# The per-case PDF status report — GET /cases/{id}/report.pdf, built in
+# app/services/case_report.py. Pure server-side rendering (Platypus), no
+# system dependency (no wkhtmltopdf/Cairo to install in the Docker image),
+# which is why this was picked over an HTML-to-PDF converter.
+reportlab==5.0.1
