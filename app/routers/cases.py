@@ -24,6 +24,7 @@ from app.models import (
     FundDeposit,
     Objection,
     Parcel,
+    Person,
     Project,
     Proposal,
     User,
@@ -149,12 +150,33 @@ def list_cases(
         # that is on screen in front of them. Both tables are already
         # inner-joined above for the row labels, so this costs no extra
         # join.
+        #
+        # Survey number and landowner name matter just as much in practice
+        # — an officer holding a physical file usually has the survey
+        # number or the owner's name on it, not the case number — but a
+        # case can have several parcels and each parcel its own owner, so
+        # this is an EXISTS subquery rather than another join: joining
+        # Parcel/Person into the main query would multiply each matching
+        # case into one row per matching parcel, corrupting both the page
+        # size and the total count.
         pattern = f"%{search}%"
+        parcel_or_owner_match = (
+            db.query(Parcel.id)
+            .outerjoin(Person, Parcel.owner_id == Person.id)
+            .filter(
+                Parcel.case_id == Case.id,
+                Parcel.survey_number.ilike(pattern)
+                | Parcel.ulpin.ilike(pattern)
+                | Person.name.ilike(pattern),
+            )
+            .exists()
+        )
         query = query.filter(
             Case.case_number.ilike(pattern)
             | Case.title.ilike(pattern)
             | Village.name.ilike(pattern)
             | Project.name.ilike(pattern)
+            | parcel_or_owner_match
         )
     if overdue_only:
         # Filtered in SQL against the stored due date, so "show me what is
