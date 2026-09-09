@@ -31,8 +31,8 @@ def upgrade() -> None:
         'grievances',
         sa.Column('id', sa.Integer(), primary_key=True),
         sa.Column('grievance_number', sa.String(length=30), nullable=False),
-        sa.Column('case_id', sa.Integer(), sa.ForeignKey('cases.id'), nullable=False, index=True),
-        sa.Column('person_id', sa.Integer(), sa.ForeignKey('people.id'), nullable=False, index=True),
+        sa.Column('case_id', sa.Integer(), sa.ForeignKey('cases.id'), nullable=False),
+        sa.Column('person_id', sa.Integer(), sa.ForeignKey('people.id'), nullable=False),
         sa.Column('filed_by_user_id', sa.Integer(), sa.ForeignKey('users.id'), nullable=False),
         sa.Column(
             'category',
@@ -71,7 +71,7 @@ def upgrade() -> None:
     op.create_table(
         'grievance_status_history',
         sa.Column('id', sa.Integer(), primary_key=True),
-        sa.Column('grievance_id', sa.Integer(), sa.ForeignKey('grievances.id'), nullable=False, index=True),
+        sa.Column('grievance_id', sa.Integer(), sa.ForeignKey('grievances.id'), nullable=False),
         sa.Column(
             'from_status',
             sa.Enum(*GRIEVANCE_STATUS_VALUES, name='grievance_status', create_type=False),
