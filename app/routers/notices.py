@@ -495,9 +495,27 @@ def subscribe(payload: SubscribeRequest, db: Session = Depends(get_db)):
     logs = landowner_notify.notify_landowner(db, parcel, project, notification_type, status_label)
     db.commit()
 
-    sms_status = next((log.status.value for log in logs if log.channel == NotificationChannel.SMS), None)
-    email_status = next((log.status.value for log in logs if log.channel == NotificationChannel.EMAIL), None)
-    push_status = next((log.status.value for log in logs if log.channel == NotificationChannel.PUSH), None)
+    # notify_landowner sends to every subscriber on this parcel, not just
+    # the one just created — a citizen subscribing to a parcel that
+    # already has other subscribers must still only be told about their
+    # own send. Matched on recipient, not just channel: `next()` on
+    # channel alone would silently report a different subscriber's status
+    # back to this one whenever more than one exists on the same channel.
+    push_recipient = f"browser:…{push_endpoint[-40:]}" if push_endpoint else None
+    sms_status = next(
+        (log.status.value for log in logs if log.channel == NotificationChannel.SMS and log.recipient == phone_number),
+        None,
+    )
+    email_status = next(
+        (log.status.value for log in logs if log.channel == NotificationChannel.EMAIL and log.recipient == email),
+        None,
+    )
+    push_status = next(
+        (log.status.value for log in logs if log.channel == NotificationChannel.PUSH and log.recipient == push_recipient),
+        None,
+    )
+    own_recipients = {r for r in (phone_number, email, push_recipient) if r is not None}
+    own_logs = [log for log in logs if log.recipient in own_recipients]
 
     return SubscribeResponse(
         id=subscription.id,
@@ -505,10 +523,10 @@ def subscribe(payload: SubscribeRequest, db: Session = Depends(get_db)):
         sms_status=sms_status,
         email_status=email_status,
         push_status=push_status,
-        # True if no attempt was made too (nothing chosen) — there's nothing
-        # "actually delivered" to caption either way, so mock is the safe
-        # default rather than a bare False with no send behind it.
-        is_mock=all(log.is_mock for log in logs) if logs else True,
+        # Same "this subscriber only" scoping as the three statuses above —
+        # an existing subscriber's mock/live provider must never leak into
+        # what this new one is told about their own send.
+        is_mock=all(log.is_mock for log in own_logs) if own_logs else True,
     )
 
 
