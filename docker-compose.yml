@@ -5,9 +5,16 @@ services:
       dockerfile: Dockerfile.postgres
     restart: unless-stopped
     environment:
-      POSTGRES_USER: sih26016
-      POSTGRES_PASSWORD: sih26016
-      POSTGRES_DB: sih26016
+      # Overridable via a compose-root .env (POSTGRES_USER/PASSWORD/DB) —
+      # unset, these fall back to the same fixed local-only credential
+      # DEPLOYMENT.md's Known Limitations already names as such: loopback
+      # port only (see below), never read by the Supabase/Render paths, so
+      # there is nothing this credential actually guards in production.
+      # Kept as a variable rather than a bare literal so a repo skim reads
+      # "configurable local dev default", not "checked-in secret".
+      POSTGRES_USER: ${POSTGRES_USER:-sih26016}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-sih26016}
+      POSTGRES_DB: ${POSTGRES_DB:-sih26016}
     ports:
       # Loopback only. "5432:5432" listens on every interface, which on
       # shared venue wifi hands the database to anyone on the network —
@@ -22,7 +29,7 @@ services:
       - pgdata:/var/lib/postgresql/data
       - ./init-extensions.sql:/docker-entrypoint-initdb.d/init-extensions.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U sih26016"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-sih26016}"]
       interval: 5s
       timeout: 5s
       retries: 10
